@@ -2,8 +2,16 @@
 
 /* ---------- Константы и утилиты ---------- */
 
+const CAL = typeof ProductionCalendar !== 'undefined'
+  ? ProductionCalendar
+  : require('./calendar.js');
+
 const STORAGE_KEY = 'salary-calculator-v1';
 const AVG_MONTH_DAYS = 29.3;
+const DIRECTOR_VACATION_PAY = 60000;
+const MANAGER_FIRST_PAYMENT = 60000;
+
+const PAY_TYPES = { manager: 'Менеджер', director: 'Руководитель' };
 
 const ABSENCE_TYPES = {
   vacation: { label: 'Отпуск', short: 'Отпуск', cls: 'vacation' },
@@ -13,6 +21,8 @@ const ABSENCE_TYPES = {
 
 const MONTH_NAMES = ['Январь', 'Февраль', 'Март', 'Апрель', 'Май', 'Июнь',
   'Июль', 'Август', 'Сентябрь', 'Октябрь', 'Ноябрь', 'Декабрь'];
+
+const WEEKDAY_NAMES = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс'];
 
 function round2(value) {
   return Math.round((value + Number.EPSILON) * 100) / 100;
@@ -39,16 +49,24 @@ function uid() {
   return 'id' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
 }
 
+/** Пустое поле трактуется как ноль. */
 function num(value) {
-  const n = Number(String(value == null ? '' : value).replace(',', '.').replace(/\s/g, ''));
+  if (value === '' || value === null || value === undefined) return 0;
+  const n = Number(String(value).replace(',', '.').replace(/\s/g, ''));
   return Number.isFinite(n) ? n : 0;
+}
+
+/** Значение денежного поля для показа в input: 0 из старых данных не мешает вводу. */
+function fieldValue(value) {
+  if (value === '' || value === null || value === undefined) return '';
+  return String(value);
 }
 
 /* ---------- Работа с датами ---------- */
 
 function parseDate(iso) {
   if (!iso) return null;
-  const [y, m, d] = iso.split('-').map(Number);
+  const [y, m, d] = String(iso).split('-').map(Number);
   if (!y || !m || !d) return null;
   return new Date(Date.UTC(y, m - 1, d));
 }
@@ -73,42 +91,67 @@ function monthTitle(monthKey) {
 
 function prevMonthKey(monthKey) {
   const [y, m] = monthKey.split('-').map(Number);
-  const d = new Date(Date.UTC(y, m - 2, 1));
-  return monthKeyOf(d);
+  return monthKeyOf(new Date(Date.UTC(y, m - 2, 1)));
 }
 
 function daysBetweenInclusive(from, to) {
   return Math.floor((to - from) / 86400000) + 1;
 }
 
-/** Рабочие дни по графику 5/2 (пн–пт), без учёта праздников. */
-function workdaysBetween(from, to) {
-  let count = 0;
-  for (let d = new Date(from); d <= to; d.setUTCDate(d.getUTCDate() + 1)) {
-    const wd = d.getUTCDay();
-    if (wd !== 0 && wd !== 6) count += 1;
-  }
-  return count;
-}
-
 function formatDayMonth(iso) {
   const d = parseDate(iso);
   if (!d) return '';
-  const dd = String(d.getUTCDate()).padStart(2, '0');
-  const mm = String(d.getUTCMonth() + 1).padStart(2, '0');
-  return dd + '.' + mm;
+  return String(d.getUTCDate()).padStart(2, '0') + '.' + String(d.getUTCMonth() + 1).padStart(2, '0');
+}
+
+function todayIso() {
+  return new Date().toISOString().slice(0, 10);
 }
 
 /* ---------- Состояние ---------- */
 
+const emptyPayment = () => ({ amount: '', paidAmount: null, paidDate: '' });
+
 const defaultMonthRecord = () => ({
-  oklad: 0, plan: 0, norm: 21, manual: 0,
-  revenueOut: 0, revenueIn: 0, comment: '',
+  oklad: '', plan: '', norm: '', normManual: false,
+  bonus: '', seniority: '', penalty: '', manual: '',
+  revenueOut: '', revenueIn: '', comment: '',
+  payments: { first: emptyPayment(), second: emptyPayment() },
 });
 
-let state = { version: 1, employees: [], months: {} };
+let state = { version: 2, employees: [], months: {} };
 let currentMonth = monthKeyOf(new Date());
 const openRows = new Set();
+
+/** Приводит данные любой версии (в том числе резервные копии v1) к текущей схеме. */
+function migrate(raw) {
+  const employees = (raw.employees || []).map((emp) => ({
+    id: emp.id || uid(),
+    name: emp.name || '',
+    position: emp.position || '',
+    payType: PAY_TYPES[emp.payType] ? emp.payType : 'manager',
+    hireDate: emp.hireDate || '',
+    absences: (emp.absences || []).map((a) => ({ ...a, overrides: a.overrides || {} })),
+  }));
+  const months = {};
+  for (const [monthKey, byEmployee] of Object.entries(raw.months || {})) {
+    months[monthKey] = {};
+    for (const [empId, rec] of Object.entries(byEmployee || {})) {
+      const payments = rec.payments || {};
+      months[monthKey][empId] = {
+        ...defaultMonthRecord(),
+        ...rec,
+        // В первой версии норма всегда вводилась вручную.
+        normManual: rec.normManual === undefined ? rec.norm !== undefined && rec.norm !== '' : !!rec.normManual,
+        payments: {
+          first: { ...emptyPayment(), ...(payments.first || {}) },
+          second: { ...emptyPayment(), ...(payments.second || {}) },
+        },
+      };
+    }
+  }
+  return { version: 2, employees, months };
+}
 
 function loadState() {
   try {
@@ -116,7 +159,7 @@ function loadState() {
     if (!raw) return;
     const parsed = JSON.parse(raw);
     if (parsed && Array.isArray(parsed.employees) && parsed.months) {
-      state = { version: 1, employees: parsed.employees, months: parsed.months };
+      state = migrate(parsed);
       if (parsed.currentMonth) currentMonth = parsed.currentMonth;
     }
   } catch (err) {
@@ -124,16 +167,18 @@ function loadState() {
   }
 }
 
+const hasDom = typeof document !== 'undefined';
+
 function saveState() {
-  const payload = JSON.stringify({ ...state, currentMonth });
-  localStorage.setItem(STORAGE_KEY, payload);
+  if (!hasDom) return;
+  localStorage.setItem(STORAGE_KEY, JSON.stringify({ ...state, currentMonth }));
   flashSaved();
 }
 
 let savedTimer = null;
 function flashSaved() {
   const badge = document.getElementById('savedBadge');
-  badge.textContent = 'Сохранено';
+  if (!badge) return;
   badge.style.opacity = '0.4';
   clearTimeout(savedTimer);
   savedTimer = setTimeout(() => { badge.style.opacity = '1'; }, 200);
@@ -142,7 +187,9 @@ function flashSaved() {
 function monthRecord(empId, monthKey = currentMonth) {
   if (!state.months[monthKey]) state.months[monthKey] = {};
   if (!state.months[monthKey][empId]) state.months[monthKey][empId] = defaultMonthRecord();
-  return state.months[monthKey][empId];
+  const rec = state.months[monthKey][empId];
+  if (!rec.payments) rec.payments = { first: emptyPayment(), second: emptyPayment() };
+  return rec;
 }
 
 function findEmployee(empId) {
@@ -151,7 +198,6 @@ function findEmployee(empId) {
 
 /* ---------- Отсутствия ---------- */
 
-/** Часть отсутствия, попадающая в указанный месяц. */
 function absenceInMonth(absence, monthKey) {
   const start = parseDate(absence.start);
   const end = parseDate(absence.end);
@@ -160,17 +206,15 @@ function absenceInMonth(absence, monthKey) {
   const a = start > from ? start : from;
   const b = end < to ? end : to;
   if (a > b) return null;
-  const calendarDays = daysBetweenInclusive(a, b);
-  const defaultWorkDays = workdaysBetween(a, b);
   const override = absence.overrides && absence.overrides[monthKey];
-  const workDays = override === undefined || override === null || override === ''
-    ? defaultWorkDays
-    : Math.max(0, num(override));
+  const defaultWorkDays = CAL.workdaysBetween(a, b);
   return {
     type: absence.type,
-    calendarDays,
+    calendarDays: daysBetweenInclusive(a, b),
     defaultWorkDays,
-    workDays,
+    workDays: override === undefined || override === null || override === ''
+      ? defaultWorkDays
+      : Math.max(0, num(override)),
     from: toIso(a),
     to: toIso(b),
   };
@@ -191,14 +235,36 @@ function absencesOverlap(a, b) {
   return aStart <= bEnd && bStart <= aEnd;
 }
 
+/* ---------- Норма рабочих дней ---------- */
+
+/** Норма от даты выхода на работу: с даты выхода включительно до конца месяца. */
+function autoNorm(employee, monthKey) {
+  const { from, to } = monthBounds(monthKey);
+  const hire = parseDate(employee.hireDate);
+  const start = hire && hire > from ? hire : from;
+  if (hire && hire > to) return 0;
+  return CAL.workdaysBetween(start, to);
+}
+
+function normHint(employee, monthKey) {
+  const hire = parseDate(employee.hireDate);
+  const { from, to } = monthBounds(monthKey);
+  const auto = autoNorm(employee, monthKey);
+  if (hire && hire > to) return 'Сотрудник ещё не вышел на работу в этом месяце';
+  if (hire && hire > from) return `Вышел ${formatDayMonth(employee.hireDate)} — норма с даты выхода: ${auto} рабочих дней`;
+  return `Норма месяца по производственному календарю: ${auto} рабочих дней`;
+}
+
 /* ---------- Расчёт ---------- */
 
 function calcEmployee(employee, monthKey = currentMonth) {
   const rec = monthRecord(employee.id, monthKey);
   const oklad = num(rec.oklad);
   const plan = num(rec.plan);
-  const kpi = plan - oklad;
-  const norm = num(rec.norm);
+  const fullKpi = Math.max(plan - oklad, 0);
+  const auto = autoNorm(employee, monthKey);
+  const norm = rec.normManual ? num(rec.norm) : auto;
+  const isDirector = employee.payType === 'director';
 
   let vacationCal = 0, vacationWork = 0;
   let sickCal = 0, sickWork = 0;
@@ -212,26 +278,40 @@ function calcEmployee(employee, monthKey = currentMonth) {
 
   const missedWork = vacationWork + sickWork + unpaidWork;
   const worked = Math.max(0, norm - missedWork);
-  const ratio = norm > 0 ? worked / norm : 0;
+  const kpiEarned = norm > 0 ? round2(fullKpi * worked / norm) : 0;
 
-  const okladWork = round2(oklad * ratio);
-  const kpiWork = round2(kpi * ratio);
-  const salaryWork = round2(plan * ratio);
-  const vacationPay = round2(oklad / AVG_MONTH_DAYS * vacationCal);
+  const vacationPay = isDirector
+    ? (vacationCal > 0 ? DIRECTOR_VACATION_PAY : 0)
+    : round2(oklad / AVG_MONTH_DAYS * vacationCal);
   const sickPay = round2(oklad / AVG_MONTH_DAYS * sickCal);
+
+  const bonus = num(rec.bonus);
+  const seniority = num(rec.seniority);
+  const penalty = num(rec.penalty);
   const manual = num(rec.manual);
-  const total = round2(salaryWork + vacationPay + sickPay + manual);
+
+  const accrued = round2(oklad + kpiEarned + vacationPay + sickPay
+    + bonus + seniority - penalty + manual);
+
+  const first = rec.payments.first;
+  const second = rec.payments.second;
+  const firstPlanned = first.amount !== '' ? num(first.amount) : (isDirector ? 0 : MANAGER_FIRST_PAYMENT);
+  const paidTotal = round2((first.paidAmount || 0) + (second.paidAmount || 0));
+  const remaining = round2(accrued - paidTotal);
+  const secondPlanned = second.paidAmount !== null ? num(second.paidAmount) : Math.max(remaining, 0);
 
   const revenueOut = num(rec.revenueOut);
   const revenueIn = num(rec.revenueIn);
-  const profit = round2(revenueOut - revenueIn);
 
   return {
-    rec, oklad, plan, kpi, norm,
+    rec, employee, isDirector,
+    oklad, plan, fullKpi, norm, autoNorm: auto,
     vacationCal, vacationWork, sickCal, sickWork, unpaidCal, unpaidWork,
-    missedWork, worked, okladWork, kpiWork, salaryWork,
-    vacationPay, sickPay, manual, total,
-    revenueOut, revenueIn, profit,
+    missedWork, worked, kpiEarned, vacationPay, sickPay,
+    bonus, seniority, penalty, manual, accrued,
+    firstPlanned, secondPlanned, paidTotal, remaining,
+    overpaid: remaining < 0 ? -remaining : 0,
+    revenueOut, revenueIn, profit: round2(revenueOut - revenueIn),
     hasAbsence: vacationCal + sickCal + unpaidCal > 0,
   };
 }
@@ -241,14 +321,18 @@ function validate() {
   for (const emp of state.employees) {
     const c = calcEmployee(emp);
     const who = emp.name || 'Без имени';
-    if (c.oklad < 0 || c.plan < 0 || c.norm < 0 || c.revenueOut < 0 || c.revenueIn < 0) {
-      problems.push(`${who}: отрицательные значения не допускаются.`);
+    const negative = [['Оклад', c.oklad], ['Плановая зарплата', c.plan], ['Норма', c.norm],
+      ['Премия', c.bonus], ['Выслуга лет', c.seniority], ['Штрафы', c.penalty],
+      ['Оборот выход', c.revenueOut], ['Оборот вход', c.revenueIn]]
+      .filter(([, value]) => value < 0).map(([label]) => label);
+    if (negative.length) {
+      problems.push(`${who}: отрицательные значения не допускаются (${negative.join(', ')}). Минус разрешён только в ручной корректировке.`);
     }
-    if (c.plan < c.oklad) {
-      problems.push(`${who}: плановая зарплата с KPI меньше оклада — KPI получается отрицательным.`);
+    if (c.plan && c.plan < c.oklad) {
+      problems.push(`${who}: плановая зарплата с KPI меньше оклада.`);
     }
-    if (c.norm <= 0) {
-      problems.push(`${who}: укажите норму рабочих дней или смен больше нуля.`);
+    if (c.norm <= 0 && c.missedWork > 0) {
+      problems.push(`${who}: норма рабочих дней равна нулю, но указаны отсутствия.`);
     }
     if (c.missedWork > c.norm) {
       problems.push(`${who}: пропущено ${c.missedWork} рабочих дней при норме ${c.norm}.`);
@@ -267,10 +351,57 @@ function validate() {
 
 /* ---------- Отрисовка ---------- */
 
-function moneyCell(value, colorize) {
-  if (!value) return '<span class="dash">–</span>';
-  const cls = colorize ? (value > 0 ? 'money-pos' : 'money-neg') : '';
-  return `<span class="${cls}">${escapeHtml(formatMoney(value))}</span>`;
+function out(empId, key, value) {
+  return `<span data-out="${empId}:${key}">${escapeHtml(value)}</span>`;
+}
+
+function outputs(c) {
+  const id = c.employee.id;
+  return {
+    oklad: formatMoney(c.oklad),
+    fullKpi: formatMoney(c.fullKpi),
+    kpiEarned: formatMoney(c.kpiEarned),
+    vacationPay: formatMoney(c.vacationPay),
+    sickPay: formatMoney(c.sickPay),
+    bonus: formatMoney(c.bonus),
+    seniority: formatMoney(c.seniority),
+    penalty: formatMoney(c.penalty),
+    manual: formatMoney(c.manual),
+    accrued: formatMoney(c.accrued),
+    paidTotal: formatMoney(c.paidTotal),
+    remaining: c.remaining >= 0 ? formatMoney(c.remaining) : formatMoney(c.overpaid),
+    remainingLabel: c.remaining >= 0 ? 'Остаток к выплате' : 'Переплата',
+    profit: formatMoney(c.profit),
+    worked: `${c.worked} из ${c.norm}`,
+    normHint: normHint(c.employee, currentMonth),
+    secondPlanned: formatMoney(c.secondPlanned),
+    accruedShort: formatMoneyShort(c.accrued),
+    paidShort: formatMoneyShort(c.paidTotal),
+    remainingShort: (c.remaining >= 0 ? '' : '−') + formatMoneyShort(Math.abs(c.remaining)),
+    profitShort: c.profit ? formatMoneyShort(c.profit) : '–',
+    _id: id,
+  };
+}
+
+function moneyField(empId, name, label, value, opts = {}) {
+  const attrs = [
+    `data-emp="${empId}"`,
+    `data-field="${name}"`,
+    'type="number"',
+    'step="0.01"',
+    'inputmode="decimal"',
+    opts.allowNegative ? '' : 'min="0"',
+    opts.placeholder ? `placeholder="${escapeHtml(opts.placeholder)}"` : 'placeholder="0"',
+  ].filter(Boolean).join(' ');
+  return `<label class="field"><span>${escapeHtml(label)}</span><input ${attrs} value="${escapeHtml(fieldValue(value))}"></label>`;
+}
+
+function textField(empId, name, label, value, type = 'text', opts = {}) {
+  const attrs = [
+    `data-emp="${empId}"`, `data-field="${name}"`, `type="${type}"`,
+    opts.readonly ? 'readonly' : '',
+  ].filter(Boolean).join(' ');
+  return `<label class="field"><span>${escapeHtml(label)}</span><input ${attrs} value="${escapeHtml(fieldValue(value))}"></label>`;
 }
 
 function absenceTags(employee) {
@@ -285,15 +416,17 @@ function absenceTags(employee) {
 function renderSummary() {
   const totals = state.employees.reduce((acc, emp) => {
     const c = calcEmployee(emp);
-    acc.pay += c.total;
+    acc.accrued += c.accrued;
+    acc.remaining += c.remaining;
     acc.profit += c.profit;
     if (c.hasAbsence) acc.absent += 1;
     return acc;
-  }, { pay: 0, profit: 0, absent: 0 });
+  }, { accrued: 0, remaining: 0, profit: 0, absent: 0 });
 
   document.getElementById('summary').innerHTML = `
     <div class="stat"><div class="bubble">👥</div><div><div class="label">Сотрудников</div><div class="value">${state.employees.length}</div></div></div>
-    <div class="stat green"><div class="bubble">💰</div><div><div class="label">К выплате</div><div class="value">${escapeHtml(formatMoneyShort(totals.pay))}</div></div></div>
+    <div class="stat green"><div class="bubble">💰</div><div><div class="label">Начислено</div><div class="value">${escapeHtml(formatMoneyShort(totals.accrued))}</div></div></div>
+    <div class="stat blue"><div class="bubble">🧾</div><div><div class="label">Остаток к выплате</div><div class="value">${escapeHtml(formatMoneyShort(totals.remaining))}</div></div></div>
     <div class="stat green"><div class="bubble">📈</div><div><div class="label">Прибыль</div><div class="value">${escapeHtml(formatMoneyShort(totals.profit))}</div></div></div>
     <div class="stat amber"><div class="bubble">📆</div><div><div class="label">Отсутствуют</div><div class="value">${totals.absent}</div></div></div>`;
 }
@@ -305,19 +438,6 @@ function renderErrors() {
   box.hidden = false;
   box.innerHTML = '<strong>Проверьте данные:</strong><ul>' +
     problems.map((p) => `<li>${escapeHtml(p)}</li>`).join('') + '</ul>';
-}
-
-function field(empId, name, label, value, opts = {}) {
-  const type = opts.type || 'number';
-  const attrs = [
-    `data-emp="${empId}"`,
-    `data-field="${name}"`,
-    `type="${type}"`,
-    opts.readonly ? 'readonly' : '',
-    opts.min !== undefined ? `min="${opts.min}"` : '',
-    type === 'number' ? 'step="0.01"' : '',
-  ].filter(Boolean).join(' ');
-  return `<label class="field"><span>${escapeHtml(label)}</span><input ${attrs} value="${escapeHtml(value)}"></label>`;
 }
 
 function renderAbsenceList(employee) {
@@ -345,43 +465,98 @@ function renderAbsenceList(employee) {
   }).join('') + '</ul>';
 }
 
+function renderPayment(c, key, title, plannedDay, amountValue, readonlyAmount) {
+  const id = c.employee.id;
+  const payment = c.rec.payments[key];
+  const paid = payment.paidAmount !== null;
+  const amountInput = readonlyAmount || paid
+    ? `<input type="text" readonly value="${escapeHtml(formatMoney(paid ? payment.paidAmount : amountValue))}" data-pay-view="${id}:${key}">`
+    : `<input type="number" min="0" step="0.01" placeholder="0" data-pay-amount="${key}" data-emp="${id}"
+         value="${escapeHtml(payment.amount !== '' ? fieldValue(payment.amount) : (amountValue > 0 ? String(amountValue) : ''))}">`;
+  return `<div class="payment ${paid ? 'paid' : ''}">
+    <div class="payment-head"><strong>${escapeHtml(title)}</strong>
+      <span class="abs-sub">план: ${plannedDay}</span></div>
+    <label class="field"><span>Сумма</span>${amountInput}</label>
+    ${paid
+      ? `<div class="abs-sub">Выдано ${escapeHtml(formatMoney(payment.paidAmount))} · ${escapeHtml(payment.paidDate)}</div>
+         <button class="btn btn-danger" data-pay-undo="${key}" data-emp="${id}">Отменить выдачу</button>`
+      : `<button class="btn btn-primary" data-pay-mark="${key}" data-emp="${id}">Выдано</button>`}
+  </div>`;
+}
+
 function renderDetail(employee, c) {
   const id = employee.id;
+  const o = outputs(c);
+  const { from } = monthBounds(currentMonth);
+  const planned1 = formatDayMonth(toIso(from));
+  const planned15 = '15.' + currentMonth.slice(5);
+
   return `<div class="detail">
     <div class="detail-head">
       <h3>Расчёт ${escapeHtml(employee.name || 'сотрудника')}</h3>
       <div>
+        <button class="btn" data-calendar="${id}">Открыть календарь</button>
         <button class="btn btn-ghost" data-abs-add="${id}">＋ Отсутствие</button>
         <button class="btn btn-danger" data-emp-del="${id}">Удалить сотрудника</button>
       </div>
     </div>
+
     <div class="fields">
-      ${field(id, 'name', 'Имя', employee.name, { type: 'text' })}
-      ${field(id, 'position', 'Должность', employee.position, { type: 'text' })}
-      ${field(id, 'oklad', 'Оклад', c.rec.oklad, { min: 0 })}
-      ${field(id, 'plan', 'Плановая зарплата с KPI', c.rec.plan, { min: 0 })}
-      ${field(id, 'kpi', 'KPI (авто)', c.kpi, { readonly: true })}
-      ${field(id, 'norm', 'Норма дней или смен', c.rec.norm, { min: 0 })}
-      ${field(id, 'worked', 'Отработано (авто)', c.worked, { readonly: true })}
-      ${field(id, 'vacationDays', 'Отпуск, кал./раб. дн.', `${c.vacationCal} / ${c.vacationWork}`, { type: 'text', readonly: true })}
-      ${field(id, 'sickDays', 'Больничный, кал./раб. дн.', `${c.sickCal} / ${c.sickWork}`, { type: 'text', readonly: true })}
-      ${field(id, 'unpaidDays', 'За свой счёт, кал./раб. дн.', `${c.unpaidCal} / ${c.unpaidWork}`, { type: 'text', readonly: true })}
-      ${field(id, 'manual', 'Доплата или корректировка', c.rec.manual)}
-      ${field(id, 'revenueOut', 'Оборот выход', c.rec.revenueOut, { min: 0 })}
-      ${field(id, 'revenueIn', 'Оборот вход', c.rec.revenueIn, { min: 0 })}
-      ${field(id, 'comment', 'Комментарий', c.rec.comment, { type: 'text' })}
+      ${textField(id, 'name', 'Имя', employee.name)}
+      ${textField(id, 'position', 'Должность', employee.position)}
+      <label class="field"><span>Тип расчёта</span>
+        <select data-emp="${id}" data-field="payType">
+          ${Object.entries(PAY_TYPES).map(([key, label]) =>
+            `<option value="${key}" ${employee.payType === key ? 'selected' : ''}>${label}</option>`).join('')}
+        </select>
+      </label>
+      ${textField(id, 'hireDate', 'Дата выхода на работу', employee.hireDate, 'date')}
+      ${moneyField(id, 'oklad', 'Оклад', c.rec.oklad)}
+      ${moneyField(id, 'plan', 'Плановая зарплата с KPI', c.rec.plan)}
+      <label class="field"><span>Полный KPI (авто)</span><input type="text" readonly value="${escapeHtml(formatMoney(c.fullKpi))}" data-out-value="${id}:fullKpi"></label>
+      <label class="field"><span>Норма дней или смен</span>
+        <input type="number" min="0" step="1" data-emp="${id}" data-field="norm"
+          value="${escapeHtml(c.rec.normManual ? fieldValue(c.rec.norm) : String(c.norm))}"
+          ${c.rec.normManual ? '' : 'readonly'} data-out-value="${id}:normValue">
+        <label class="checkbox"><input type="checkbox" data-emp="${id}" data-field="normManual" ${c.rec.normManual ? 'checked' : ''}> Ввести вручную</label>
+        <span class="hint">${out(id, 'normHint', o.normHint)}</span>
+      </label>
+      <label class="field"><span>Отработано (авто)</span><input type="text" readonly value="${escapeHtml(o.worked)}" data-out-value="${id}:worked"></label>
+      ${textField(id, 'vacationDays', 'Отпуск, кал./раб. дн.', `${c.vacationCal} / ${c.vacationWork}`, 'text', { readonly: true })}
+      ${textField(id, 'sickDays', 'Больничный, кал./раб. дн.', `${c.sickCal} / ${c.sickWork}`, 'text', { readonly: true })}
+      ${textField(id, 'unpaidDays', 'За свой счёт, кал./раб. дн.', `${c.unpaidCal} / ${c.unpaidWork}`, 'text', { readonly: true })}
+      ${moneyField(id, 'bonus', 'Премия', c.rec.bonus)}
+      ${moneyField(id, 'seniority', 'Выслуга лет', c.rec.seniority)}
+      ${moneyField(id, 'penalty', 'Штрафы', c.rec.penalty)}
+      ${moneyField(id, 'manual', 'Ручная корректировка (± )', c.rec.manual, { allowNegative: true })}
+      ${moneyField(id, 'revenueOut', 'Оборот выход', c.rec.revenueOut)}
+      ${moneyField(id, 'revenueIn', 'Оборот вход', c.rec.revenueIn)}
+      ${textField(id, 'comment', 'Комментарий', c.rec.comment)}
     </div>
-    <div class="breakdown">
-      <div class="line"><span>Оклад за работу</span><span>${escapeHtml(formatMoney(c.okladWork))}</span></div>
-      <div class="line"><span>KPI за работу</span><span>${escapeHtml(formatMoney(c.kpiWork))}</span></div>
-      <div class="line"><span>Зарплата за работу</span><span>${escapeHtml(formatMoney(c.salaryWork))}</span></div>
-      <div class="line"><span>Отпускные</span><span>${escapeHtml(formatMoney(c.vacationPay))}</span></div>
-      <div class="line"><span>Больничные</span><span>${escapeHtml(formatMoney(c.sickPay))}</span></div>
-      <div class="line"><span>За свой счёт</span><span>${escapeHtml(formatMoney(0))}</span></div>
-      <div class="line"><span>Корректировка</span><span>${escapeHtml(formatMoney(c.manual))}</span></div>
-      <div class="line total"><span>Итого</span><span>${escapeHtml(formatMoney(c.total))}</span></div>
-      <div class="line"><span>Прибыль</span><span>${escapeHtml(formatMoney(c.profit))}</span></div>
+
+    <div class="detail-columns">
+      <div class="breakdown">
+        <div class="line"><span>Фиксированный оклад</span>${out(id, 'oklad', o.oklad)}</div>
+        <div class="line"><span>Полный KPI</span>${out(id, 'fullKpi', o.fullKpi)}</div>
+        <div class="line"><span>KPI за отработанные дни</span>${out(id, 'kpiEarned', o.kpiEarned)}</div>
+        <div class="line"><span>Отпускные${c.isDirector ? ' (фиксированные)' : ''}</span>${out(id, 'vacationPay', o.vacationPay)}</div>
+        <div class="line"><span>Больничные</span>${out(id, 'sickPay', o.sickPay)}</div>
+        <div class="line"><span>Премия</span>${out(id, 'bonus', o.bonus)}</div>
+        <div class="line"><span>Выслуга лет</span>${out(id, 'seniority', o.seniority)}</div>
+        <div class="line"><span>Штрафы</span>−${out(id, 'penalty', o.penalty)}</div>
+        <div class="line"><span>Ручная корректировка</span>${out(id, 'manual', o.manual)}</div>
+        <div class="line total"><span>Начислено всего</span>${out(id, 'accrued', o.accrued)}</div>
+        <div class="line"><span>Выдано</span>${out(id, 'paidTotal', o.paidTotal)}</div>
+        <div class="line total"><span>${out(id, 'remainingLabel', o.remainingLabel)}</span>${out(id, 'remaining', o.remaining)}</div>
+        <div class="line"><span>Прибыль</span>${out(id, 'profit', o.profit)}</div>
+      </div>
+      <div class="payments">
+        <h4>Выплаты</h4>
+        ${renderPayment(c, 'first', 'Первая выплата', planned1, c.firstPlanned, false)}
+        ${renderPayment(c, 'second', 'Вторая выплата (остаток)', planned15, c.secondPlanned, true)}
+      </div>
     </div>
+
     <h4>Отсутствия</h4>
     ${renderAbsenceList(employee)}
   </div>`;
@@ -391,23 +566,25 @@ function renderTable() {
   const body = document.getElementById('gridBody');
   body.innerHTML = state.employees.map((emp) => {
     const c = calcEmployee(emp);
+    const o = outputs(c);
     const open = openRows.has(emp.id);
     const main = `<tr class="${open ? 'row-open' : ''}" data-row="${emp.id}">
       <td class="left"><button class="toggle" data-toggle="${emp.id}">${open ? '⌄' : '›'}</button></td>
       <td class="left"><span class="name-link" data-toggle="${emp.id}">${escapeHtml(emp.name || 'Без имени')}</span></td>
       <td class="left pos">${escapeHtml(emp.position || '–')}</td>
+      <td class="left pos">${escapeHtml(PAY_TYPES[emp.payType])}</td>
       <td>${escapeHtml(formatMoneyShort(c.oklad))}</td>
       <td>${escapeHtml(formatMoneyShort(c.plan))}</td>
-      <td>${c.worked} из ${c.norm}</td>
+      <td>${out(emp.id, 'worked', o.worked)}</td>
       <td class="left">${absenceTags(emp)}</td>
-      <td>${moneyCell(c.vacationPay, false)}</td>
-      <td>${c.revenueOut ? escapeHtml(formatMoneyShort(c.revenueOut)) : '<span class="dash">–</span>'}</td>
-      <td>${c.revenueIn ? escapeHtml(formatMoneyShort(c.revenueIn)) : '<span class="dash">–</span>'}</td>
-      <td>${c.profit ? `<span class="${c.profit > 0 ? 'money-pos' : 'money-neg'}">${escapeHtml(formatMoneyShort(c.profit))}</span>` : '<span class="dash">–</span>'}</td>
-      <td><strong>${escapeHtml(formatMoney(c.total))}</strong></td>
+      <td>${out(emp.id, 'vacationPay', o.vacationPay)}</td>
+      <td>${c.profit ? `<span class="${c.profit > 0 ? 'money-pos' : 'money-neg'}">${out(emp.id, 'profitShort', o.profitShort)}</span>` : '<span class="dash">–</span>'}</td>
+      <td><strong>${out(emp.id, 'accruedShort', o.accruedShort)}</strong></td>
+      <td>${out(emp.id, 'paidShort', o.paidShort)}</td>
+      <td class="${c.remaining < 0 ? 'money-neg' : ''}">${out(emp.id, 'remainingShort', o.remainingShort)}</td>
     </tr>`;
     const detail = open
-      ? `<tr class="detail-row"><td colspan="12">${renderDetail(emp, c)}</td></tr>`
+      ? `<tr class="detail-row"><td colspan="13">${renderDetail(emp, c)}</td></tr>`
       : '';
     return main + detail;
   }).join('');
@@ -417,30 +594,33 @@ function renderMobile() {
   const list = document.getElementById('mobileList');
   list.innerHTML = state.employees.map((emp) => {
     const c = calcEmployee(emp);
+    const o = outputs(c);
     const open = openRows.has(emp.id);
     return `<article class="emp-card">
       <div class="head">
         <div>
           <div class="name" data-toggle="${emp.id}">${escapeHtml(emp.name || 'Без имени')}</div>
-          <div class="pos">${escapeHtml(emp.position || '')}</div>
+          <div class="pos">${escapeHtml(emp.position || '')} · ${escapeHtml(PAY_TYPES[emp.payType])}</div>
         </div>
         <button class="btn" data-toggle="${emp.id}">${open ? 'Свернуть' : 'Подробнее'}</button>
       </div>
       <div>${absenceTags(emp)}</div>
       <div class="rows">
-        <div class="line"><span>Отработано</span><span>${c.worked} из ${c.norm}</span></div>
-        <div class="line"><span>Зарплата за работу</span><span>${escapeHtml(formatMoney(c.salaryWork))}</span></div>
-        <div class="line"><span>Отпускные</span><span>${escapeHtml(formatMoney(c.vacationPay))}</span></div>
-        <div class="line"><span>Прибыль</span><span>${escapeHtml(formatMoney(c.profit))}</span></div>
+        <div class="line"><span>Отработано</span>${out(emp.id, 'worked', o.worked)}</div>
+        <div class="line"><span>KPI за дни</span>${out(emp.id, 'kpiEarned', o.kpiEarned)}</div>
+        <div class="line"><span>Отпускные</span>${out(emp.id, 'vacationPay', o.vacationPay)}</div>
+        <div class="line"><span>Выдано</span>${out(emp.id, 'paidTotal', o.paidTotal)}</div>
+        <div class="line"><span>${out(emp.id, 'remainingLabel', o.remainingLabel)}</span>${out(emp.id, 'remaining', o.remaining)}</div>
       </div>
-      <div class="line"><span class="pos">Итого</span></div>
-      <div class="total">${escapeHtml(formatMoney(c.total))}</div>
+      <div class="line"><span class="pos">Начислено</span></div>
+      <div class="total">${out(emp.id, 'accrued', o.accrued)}</div>
       ${open ? renderDetail(emp, c) : ''}
     </article>`;
   }).join('');
 }
 
 function render() {
+  if (!hasDom) return;
   document.getElementById('monthInput').value = currentMonth;
   renderSummary();
   renderErrors();
@@ -449,10 +629,38 @@ function render() {
   document.getElementById('emptyHint').hidden = state.employees.length > 0;
 }
 
+/** Обновляет вычисляемые значения без перерисовки полей ввода. */
+function patch(empId) {
+  const emp = findEmployee(empId);
+  if (!emp) return;
+  const o = outputs(calcEmployee(emp));
+  document.querySelectorAll(`[data-out^="${empId}:"]`).forEach((node) => {
+    const key = node.dataset.out.split(':')[1];
+    if (o[key] !== undefined) node.textContent = o[key];
+  });
+  document.querySelectorAll(`[data-out-value^="${empId}:"]`).forEach((node) => {
+    const key = node.dataset.outValue.split(':')[1];
+    const c = calcEmployee(emp);
+    if (key === 'fullKpi') node.value = formatMoney(c.fullKpi);
+    if (key === 'worked') node.value = o.worked;
+    if (key === 'normValue' && !c.rec.normManual) node.value = String(c.norm);
+  });
+  document.querySelectorAll('[data-pay-view]').forEach((node) => {
+    const [id, key] = node.dataset.payView.split(':');
+    if (id !== empId) return;
+    const c = calcEmployee(emp);
+    const payment = c.rec.payments[key];
+    node.value = formatMoney(payment.paidAmount !== null ? payment.paidAmount
+      : (key === 'second' ? c.secondPlanned : c.firstPlanned));
+  });
+  renderSummary();
+  renderErrors();
+}
+
 /* ---------- Действия ---------- */
 
 function addEmployee() {
-  const emp = { id: uid(), name: 'Новый сотрудник', position: '', absences: [] };
+  const emp = { id: uid(), name: 'Новый сотрудник', position: '', payType: 'manager', hireDate: '', absences: [] };
   state.employees.push(emp);
   monthRecord(emp.id);
   openRows.add(emp.id);
@@ -469,6 +677,7 @@ function deleteEmployee(empId) {
   render();
 }
 
+/** Переносятся только постоянные условия; премии, обороты и выплаты начинаются пустыми. */
 function copyPreviousMonth() {
   const prev = prevMonthKey(currentMonth);
   const source = state.months[prev];
@@ -476,31 +685,81 @@ function copyPreviousMonth() {
     alert('В месяце ' + monthTitle(prev) + ' нет данных для копирования.');
     return;
   }
-  if (!confirm('Скопировать данные из месяца ' + monthTitle(prev) + '? Текущие значения будут заменены.')) return;
+  if (!confirm('Скопировать оклады, плановые зарплаты и норму из месяца ' + monthTitle(prev) + '?')) return;
   state.months[currentMonth] = state.months[currentMonth] || {};
   for (const emp of state.employees) {
-    if (source[emp.id]) state.months[currentMonth][emp.id] = { ...source[emp.id] };
+    const from = source[emp.id];
+    if (!from) continue;
+    state.months[currentMonth][emp.id] = {
+      ...defaultMonthRecord(),
+      oklad: from.oklad,
+      plan: from.plan,
+      norm: from.norm,
+      normManual: from.normManual,
+    };
   }
   saveState();
   render();
 }
 
+const MONEY_FIELDS = new Set(['oklad', 'plan', 'bonus', 'seniority', 'penalty', 'manual', 'revenueOut', 'revenueIn', 'norm']);
+
 function setEmployeeField(empId, fieldName, value) {
   const emp = findEmployee(empId);
   if (!emp) return;
-  if (fieldName === 'name' || fieldName === 'position') {
+  if (fieldName === 'name' || fieldName === 'position' || fieldName === 'hireDate' || fieldName === 'payType') {
     emp[fieldName] = value;
   } else if (fieldName === 'comment') {
     monthRecord(empId).comment = value;
-  } else {
-    monthRecord(empId)[fieldName] = value === '' ? 0 : num(value);
+  } else if (fieldName === 'normManual') {
+    const rec = monthRecord(empId);
+    rec.normManual = value;
+    if (value && rec.norm === '') rec.norm = String(autoNorm(emp, currentMonth));
+  } else if (MONEY_FIELDS.has(fieldName)) {
+    monthRecord(empId)[fieldName] = value === '' ? '' : String(value);
   }
   saveState();
 }
 
-/* ---------- Модальное окно отсутствия ---------- */
+function markPaid(empId, key) {
+  const emp = findEmployee(empId);
+  const c = calcEmployee(emp);
+  const payment = c.rec.payments[key];
+  const amount = key === 'second' ? c.secondPlanned : c.firstPlanned;
+  if (amount <= 0) {
+    alert('Укажите сумму выплаты больше нуля.');
+    return;
+  }
+  payment.paidAmount = round2(amount);
+  payment.paidDate = todayIso();
+  if (key === 'first' && payment.amount === '') payment.amount = String(round2(amount));
+  saveState();
+  render();
+}
+
+function undoPaid(empId, key) {
+  const rec = monthRecord(empId);
+  rec.payments[key] = { ...rec.payments[key], paidAmount: null, paidDate: '' };
+  saveState();
+  render();
+}
+
+/* ---------- Модальные окна ---------- */
 
 let modalContext = null;
+
+function openModal(title, bodyHtml, options = {}) {
+  document.getElementById('modalTitle').textContent = title;
+  document.getElementById('modalBody').innerHTML = bodyHtml;
+  document.getElementById('modalSave').hidden = !!options.hideSave;
+  document.getElementById('modalCancel').textContent = options.closeLabel || 'Отмена';
+  document.getElementById('modal').hidden = false;
+}
+
+function closeModal() {
+  document.getElementById('modal').hidden = true;
+  modalContext = null;
+}
 
 function openAbsenceModal(empId, absenceId) {
   const emp = findEmployee(empId);
@@ -508,10 +767,9 @@ function openAbsenceModal(empId, absenceId) {
   const existing = (emp.absences || []).find((a) => a.id === absenceId);
   const { from } = monthBounds(currentMonth);
   const defaults = existing || { type: 'vacation', start: toIso(from), end: toIso(from) };
-  modalContext = { empId, absenceId: absenceId || null };
+  modalContext = { kind: 'absence', empId, absenceId: absenceId || null };
 
-  document.getElementById('modalTitle').textContent = existing ? 'Изменить отсутствие' : 'Добавить отсутствие';
-  document.getElementById('modalBody').innerHTML = `
+  openModal(existing ? 'Изменить отсутствие' : 'Добавить отсутствие', `
     <label class="field"><span>Тип</span>
       <select id="absType">
         ${Object.entries(ABSENCE_TYPES).map(([key, meta]) =>
@@ -521,29 +779,23 @@ function openAbsenceModal(empId, absenceId) {
     <label class="field"><span>Дата начала</span><input type="date" id="absStart" value="${escapeHtml(defaults.start)}"></label>
     <label class="field"><span>Дата окончания</span><input type="date" id="absEnd" value="${escapeHtml(defaults.end)}"></label>
     <label class="field"><span>Календарных дней (авто)</span><input type="text" id="absCal" readonly></label>
-    <label class="field"><span>Пропущено рабочих дней 5/2 (авто)</span><input type="text" id="absWork" readonly></label>
-    <div class="modal-error" id="absError"></div>`;
+    <label class="field"><span>Пропущено рабочих дней (авто)</span><input type="text" id="absWork" readonly></label>
+    <div class="modal-error" id="absError"></div>`);
 
   const refresh = () => {
     const s = parseDate(document.getElementById('absStart').value);
     const e = parseDate(document.getElementById('absEnd').value);
     const ok = s && e && e >= s;
     document.getElementById('absCal').value = ok ? daysBetweenInclusive(s, e) : '—';
-    document.getElementById('absWork').value = ok ? workdaysBetween(s, e) : '—';
+    document.getElementById('absWork').value = ok ? CAL.workdaysBetween(s, e) : '—';
   };
   document.getElementById('absStart').addEventListener('input', refresh);
   document.getElementById('absEnd').addEventListener('input', refresh);
   refresh();
-  document.getElementById('modal').hidden = false;
-}
-
-function closeModal() {
-  document.getElementById('modal').hidden = true;
-  modalContext = null;
 }
 
 function saveAbsence() {
-  if (!modalContext) return;
+  if (!modalContext || modalContext.kind !== 'absence') return;
   const emp = findEmployee(modalContext.empId);
   if (!emp) return;
   const type = document.getElementById('absType').value;
@@ -565,13 +817,49 @@ function saveAbsence() {
 
   emp.absences = emp.absences || [];
   const index = emp.absences.findIndex((a) => a.id === candidate.id);
-  if (index >= 0) emp.absences[index] = { ...emp.absences[index], ...candidate, overrides: {} };
+  if (index >= 0) emp.absences[index] = candidate;
   else emp.absences.push(candidate);
   emp.absences.sort((a, b) => a.start.localeCompare(b.start));
 
   saveState();
   closeModal();
   render();
+}
+
+function dayClass(employee, date) {
+  const iso = toIso(date);
+  for (const { part } of absencesOfMonth(employee, currentMonth)) {
+    if (iso >= part.from && iso <= part.to) return 'day-' + part.type;
+  }
+  const hire = parseDate(employee.hireDate);
+  if (hire && date < hire) return 'day-before-hire';
+  if (!CAL.isWorkingDay(date)) return 'day-off';
+  return 'day-work';
+}
+
+function openCalendarModal(empId) {
+  const emp = findEmployee(empId);
+  if (!emp) return;
+  modalContext = { kind: 'calendar', empId };
+  const { from, to } = monthBounds(currentMonth);
+  const lead = (from.getUTCDay() + 6) % 7;
+  const cells = [];
+  for (let i = 0; i < lead; i += 1) cells.push('<div class="day empty"></div>');
+  for (const d = new Date(from); d <= to; d.setUTCDate(d.getUTCDate() + 1)) {
+    cells.push(`<div class="day ${dayClass(emp, d)}">${d.getUTCDate()}</div>`);
+  }
+  const c = calcEmployee(emp);
+  openModal(`Календарь: ${monthTitle(currentMonth)}`, `
+    <p class="abs-sub">${escapeHtml(normHint(emp, currentMonth))}. Отработано: ${c.worked} из ${c.norm}.</p>
+    <div class="cal-grid">${WEEKDAY_NAMES.map((w) => `<div class="day head">${w}</div>`).join('')}${cells.join('')}</div>
+    <div class="cal-legend">
+      <span><i class="day-work"></i> в норме</span>
+      <span><i class="day-off"></i> выходной или праздник</span>
+      <span><i class="day-before-hire"></i> до выхода</span>
+      <span><i class="day-vacation"></i> отпуск</span>
+      <span><i class="day-sick"></i> больничный</span>
+      <span><i class="day-unpaid"></i> за свой счёт</span>
+    </div>`, { hideSave: true, closeLabel: 'Закрыть' });
 }
 
 /* ---------- Экспорт и импорт ---------- */
@@ -588,10 +876,12 @@ function download(filename, content, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const CSV_HEADERS = ['Имя', 'Должность', 'Оклад', 'Плановая ЗП с KPI', 'KPI', 'Норма дней',
-  'Отработано', 'Отпуск кал.', 'Отпуск раб.', 'Больничный кал.', 'Больничный раб.',
-  'За свой счёт кал.', 'За свой счёт раб.', 'Оклад за работу', 'KPI за работу', 'Отпускные',
-  'Больничные', 'Корректировка', 'Итого', 'Оборот выход', 'Оборот вход', 'Прибыль', 'Комментарий'];
+const CSV_HEADERS = ['Имя', 'Должность', 'Тип расчёта', 'Дата выхода', 'Оклад', 'Плановая ЗП с KPI',
+  'Полный KPI', 'Норма дней', 'Отработано', 'Отпуск кал.', 'Отпуск раб.', 'Больничный кал.',
+  'Больничный раб.', 'За свой счёт кал.', 'За свой счёт раб.', 'KPI за отработанные дни',
+  'Отпускные', 'Больничные', 'Премия', 'Выслуга лет', 'Штрафы', 'Ручная корректировка',
+  'Начислено', 'Первая выплата', 'Дата первой выплаты', 'Вторая выплата', 'Дата второй выплаты',
+  'Всего выдано', 'Остаток', 'Переплата', 'Оборот выход', 'Оборот вход', 'Прибыль', 'Комментарий'];
 
 function csvValue(value) {
   const text = typeof value === 'number' ? String(round2(value)).replace('.', ',') : String(value ?? '');
@@ -602,10 +892,15 @@ function exportCsv() {
   const rows = [CSV_HEADERS.map(csvValue).join(';')];
   for (const emp of state.employees) {
     const c = calcEmployee(emp);
+    const first = c.rec.payments.first;
+    const second = c.rec.payments.second;
     rows.push([
-      emp.name, emp.position, c.oklad, c.plan, c.kpi, c.norm, c.worked,
+      emp.name, emp.position, PAY_TYPES[emp.payType], emp.hireDate,
+      c.oklad, c.plan, c.fullKpi, c.norm, c.worked,
       c.vacationCal, c.vacationWork, c.sickCal, c.sickWork, c.unpaidCal, c.unpaidWork,
-      c.okladWork, c.kpiWork, c.vacationPay, c.sickPay, c.manual, c.total,
+      c.kpiEarned, c.vacationPay, c.sickPay, c.bonus, c.seniority, c.penalty, c.manual,
+      c.accrued, first.paidAmount || 0, first.paidDate, second.paidAmount || 0, second.paidDate,
+      c.paidTotal, Math.max(c.remaining, 0), c.overpaid,
       c.revenueOut, c.revenueIn, c.profit, c.rec.comment,
     ].map(csvValue).join(';'));
   }
@@ -626,7 +921,7 @@ function importBackup(file) {
         throw new Error('Неверный формат файла');
       }
       if (!confirm('Заменить текущие данные данными из файла?')) return;
-      state = { version: 1, employees: parsed.employees, months: parsed.months };
+      state = migrate(parsed);
       if (parsed.currentMonth) currentMonth = parsed.currentMonth;
       openRows.clear();
       saveState();
@@ -643,11 +938,18 @@ function importBackup(file) {
 
 function onInput(event) {
   const target = event.target;
-  if (target.dataset.field && !target.readOnly) {
-    setEmployeeField(target.dataset.emp, target.dataset.field, target.value);
-    renderSummary();
-    renderErrors();
-    updateComputedFields(target.dataset.emp);
+  if (target.dataset.field !== undefined && !target.readOnly) {
+    const value = target.type === 'checkbox' ? target.checked : target.value;
+    setEmployeeField(target.dataset.emp, target.dataset.field, value);
+    if (target.dataset.field === 'normManual' || target.dataset.field === 'payType') render();
+    else patch(target.dataset.emp);
+    return;
+  }
+  if (target.dataset.payAmount) {
+    const rec = monthRecord(target.dataset.emp);
+    rec.payments[target.dataset.payAmount].amount = target.value;
+    saveState();
+    patch(target.dataset.emp);
     return;
   }
   if (target.dataset.absDays) {
@@ -657,52 +959,50 @@ function onInput(event) {
     absence.overrides = absence.overrides || {};
     absence.overrides[currentMonth] = Math.max(0, num(target.value));
     saveState();
-    renderSummary();
-    renderErrors();
-    updateComputedFields(emp.id);
+    patch(emp.id);
   }
 }
 
-function updateComputedFields(empId) {
-  const emp = findEmployee(empId);
-  if (!emp) return;
-  const c = calcEmployee(emp);
-  const scope = document.querySelectorAll(`[data-emp="${empId}"][data-field]`);
-  scope.forEach((input) => {
-    if (!input.readOnly) return;
-    if (input.dataset.field === 'kpi') input.value = c.kpi;
-    if (input.dataset.field === 'worked') input.value = c.worked;
-  });
-  const detailBlocks = document.querySelectorAll(`[data-abs-add="${empId}"]`);
-  detailBlocks.forEach((btn) => {
-    const detail = btn.closest('.detail');
-    if (!detail) return;
-    const lines = detail.querySelectorAll('.breakdown .line span:last-child');
-    const values = [c.okladWork, c.kpiWork, c.salaryWork, c.vacationPay, c.sickPay, 0, c.manual, c.total, c.profit];
-    lines.forEach((span, i) => { span.textContent = formatMoney(values[i]); });
-  });
+/** Ноль в пустом поле не должен мешать вводу нового числа. */
+function onFocusIn(event) {
+  const target = event.target;
+  if (target.tagName !== 'INPUT' || target.type !== 'number' || target.readOnly) return;
+  if (target.value === '0') {
+    target.value = '';
+    if (target.dataset.field) setEmployeeField(target.dataset.emp, target.dataset.field, '');
+    if (target.dataset.payAmount) {
+      monthRecord(target.dataset.emp).payments[target.dataset.payAmount].amount = '';
+      saveState();
+    }
+  }
 }
 
 function onClick(event) {
-  const target = event.target.closest('[data-toggle], [data-abs-add], [data-abs-edit], [data-abs-del], [data-emp-del]');
+  const target = event.target.closest('[data-toggle], [data-abs-add], [data-abs-edit], [data-abs-del], [data-emp-del], [data-calendar], [data-pay-mark], [data-pay-undo]');
   if (!target) return;
-  if (target.dataset.toggle) {
-    const id = target.dataset.toggle;
-    if (openRows.has(id)) openRows.delete(id); else openRows.add(id);
+  const data = target.dataset;
+  if (data.toggle) {
+    if (openRows.has(data.toggle)) openRows.delete(data.toggle); else openRows.add(data.toggle);
     render();
-  } else if (target.dataset.absAdd) {
-    openAbsenceModal(target.dataset.absAdd, null);
-  } else if (target.dataset.absEdit) {
-    openAbsenceModal(target.dataset.emp, target.dataset.absEdit);
-  } else if (target.dataset.absDel) {
-    const emp = findEmployee(target.dataset.emp);
+  } else if (data.absAdd) {
+    openAbsenceModal(data.absAdd, null);
+  } else if (data.absEdit) {
+    openAbsenceModal(data.emp, data.absEdit);
+  } else if (data.absDel) {
+    const emp = findEmployee(data.emp);
     if (emp && confirm('Удалить это отсутствие?')) {
-      emp.absences = emp.absences.filter((a) => a.id !== target.dataset.absDel);
+      emp.absences = emp.absences.filter((a) => a.id !== data.absDel);
       saveState();
       render();
     }
-  } else if (target.dataset.empDel) {
-    deleteEmployee(target.dataset.empDel);
+  } else if (data.empDel) {
+    deleteEmployee(data.empDel);
+  } else if (data.calendar) {
+    openCalendarModal(data.calendar);
+  } else if (data.payMark) {
+    markPaid(data.emp, data.payMark);
+  } else if (data.payUndo) {
+    undoPaid(data.emp, data.payUndo);
   }
 }
 
@@ -733,6 +1033,10 @@ function init() {
   });
 
   document.addEventListener('input', onInput);
+  document.addEventListener('change', (e) => {
+    if (e.target.tagName === 'SELECT' && e.target.dataset.field) onInput(e);
+  });
+  document.addEventListener('focusin', onFocusIn);
   document.addEventListener('click', onClick);
 
   render();
@@ -744,13 +1048,10 @@ if (typeof document !== 'undefined') {
 
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
-    round2,
-    formatMoney,
-    workdaysBetween,
-    daysBetweenInclusive,
-    parseDate,
-    calcEmployee,
-    validate,
-    setTestState: (nextState, monthKey) => { state = nextState; currentMonth = monthKey; },
+    round2, formatMoney, num, parseDate, autoNorm, calcEmployee, validate, migrate,
+    markPaid, monthRecord, copyPreviousMonth,
+    setTestState: (nextState, monthKey) => { state = migrate(nextState); currentMonth = monthKey; return state; },
+    getState: () => state,
+    setCurrentMonth: (monthKey) => { currentMonth = monthKey; },
   };
 }

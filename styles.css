@@ -201,6 +201,48 @@ body {
 .abs-list .abs-sub { color: var(--muted); font-size: 12px; }
 .abs-list input.days { width: 70px; }
 
+.stat.blue .bubble { background: var(--blue-soft); }
+.stat.blue .value { color: var(--blue); }
+
+.checkbox { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin-top: 4px; }
+.checkbox input { width: auto; }
+.hint { font-size: 12px; color: var(--muted); }
+
+.detail-columns { display: flex; flex-wrap: wrap; gap: 14px; align-items: flex-start; }
+
+.payments {
+  background: #fff;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  padding: 12px 14px;
+  min-width: 260px;
+  flex: 1 1 260px;
+  max-width: 360px;
+}
+.payments h4 { margin: 0 0 8px; }
+.payment { border-top: 1px solid var(--line); padding: 10px 0 4px; }
+.payment:first-of-type { border-top: 0; }
+.payment.paid { color: var(--green); }
+.payment-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
+
+.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); gap: 4px; margin: 10px 0; }
+.cal-grid .day {
+  aspect-ratio: 1 / 1;
+  display: grid; place-items: center;
+  border-radius: 8px; font-size: 13px;
+  background: #eef2f8;
+}
+.cal-grid .day.head { background: transparent; color: var(--muted); font-size: 12px; aspect-ratio: auto; }
+.cal-grid .day.empty { background: transparent; }
+.day-work { background: var(--green-soft); color: #14713a; }
+.day-off { background: #eef0f4; color: var(--muted); }
+.day-before-hire { background: #f5f5f5; color: #b6bcc7; text-decoration: line-through; }
+.day-vacation { background: var(--amber-soft); color: var(--amber); }
+.day-sick { background: #fdeeee; color: #b91c1c; }
+.day-unpaid { background: #e7e9ef; color: #4b5563; }
+.cal-legend { display: flex; flex-wrap: wrap; gap: 10px; font-size: 12px; color: var(--muted); }
+.cal-legend i { display: inline-block; width: 12px; height: 12px; border-radius: 4px; margin-right: 4px; vertical-align: -1px; }
+
 .mobile-list { display: none; }
 .emp-card {
   background: var(--card);
