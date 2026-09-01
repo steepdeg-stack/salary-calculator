@@ -1,5 +1,7 @@
 /* Проверка формул v2: node tests/check.js */
 const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
 const app = require('../app.js');
 const CAL = require('../calendar.js');
 
@@ -21,6 +23,15 @@ check('Рабочих дней в июле 2026', CAL.workdaysBetween(d('2026-07
 check('Рабочих дней в августе 2026', CAL.workdaysBetween(d('2026-08-01'), d('2026-08-31')), 21);
 check('Рабочих дней с 5 по 31 августа 2026', CAL.workdaysBetween(d('2026-08-05'), d('2026-08-31')), 19);
 check('9 мая 2026 — нерабочий', CAL.isWorkingDay(d('2026-05-09')), false);
+
+/* ---------- Навигация по месяцу ---------- */
+
+check('Предыдущий месяц внутри года', app.shiftMonthKey('2026-08', -1), '2026-07');
+check('Предыдущий месяц через границу года', app.shiftMonthKey('2026-01', -1), '2025-12');
+check('Следующий месяц через границу года', app.shiftMonthKey('2026-12', 1), '2027-01');
+check('Месяц собирается из явных полей месяца и года', app.monthKeyFromParts('2026', '8'), '2026-08');
+check('Некорректный месяц отклоняется', app.monthKeyFromParts('2026', '13'), null);
+check('Повреждённый сохранённый месяц заменяется безопасным', app.normalizeMonthKey('2026-99', '2026-08'), '2026-08');
 
 /* ---------- Данные для расчётов ---------- */
 
@@ -82,7 +93,8 @@ check('Алексей, июль: оклад не уменьшается из-з�
 check('Алексей, июль: полный KPI', c.fullKpi, 140000);
 check('Алексей, июль: KPI за отработанные дни', c.kpiEarned, 109565.22);
 check('Алексей, июль: отпускные только от оклада', c.vacationPay, 10238.91);
-check('Алексей, июль: начислено', c.accrued, 179804.13);
+check('Алексей, июль: отпускные не прибавляются сверху', c.vacationPayAdded, 0);
+check('Алексей, июль: начислено', c.accrued, 169565.22);
 
 state = load('2026-08');
 c = app.calcEmployee(employeeOf(state, 'alexey'), '2026-08');
@@ -92,8 +104,44 @@ check('Алексей, август: рабочие дни отпуска', c.va
 check('Алексей, август: отработано', c.worked, 16);
 check('Алексей, август: KPI за отработанные дни', c.kpiEarned, 106666.67);
 check('Алексей, август: отпускные', c.vacationPay, 18430.03);
-check('Алексей, август: начислено', c.accrued, 185096.70);
+check('Алексей, август: начислено', c.accrued, 166666.67);
 check('Алексей, август: прибыль', c.profit, 25547547);
+
+/* Критический acceptance-пример: отпускные показаны, но не прибавлены к итогу. */
+state.employees[0].absences = [
+  { id: 'acceptance-vacation', type: 'vacation', start: '2026-08-01', end: '2026-08-14', overrides: {} },
+];
+state.months['2026-08'].alexey = { oklad: 60000, plan: 130000 };
+c = app.calcEmployee(employeeOf(state, 'alexey'), '2026-08');
+check('Acceptance: 14 календарных дней отпуска', c.vacationCal, 14);
+check('Acceptance: 10 рабочих дней отпуска', c.vacationWork, 10);
+check('Acceptance: отработано 11 дней', c.worked, 11);
+check('Acceptance: фиксированный оклад сохранён', c.fixedEarned, 60000);
+check('Acceptance: KPI за работу', c.kpiEarned, 36666.67);
+check('Acceptance: расчётные отпускные справочно', c.vacationPay, 28668.94);
+check('Acceptance: отпускные не входят в сумму', c.vacationPayAdded, 0);
+check('Acceptance: начислено всего', c.accrued, 96666.67);
+
+/* Полный месяц и дни за свой счёт. */
+state.employees[0].absences = [];
+c = app.calcEmployee(employeeOf(state, 'alexey'), '2026-08');
+check('Полный месяц: оклад плюс полный KPI', c.accrued, 130000);
+state.employees[0].absences = [
+  { id: 'unpaid', type: 'unpaid', start: '2026-08-03', end: '2026-08-07', overrides: {} },
+];
+c = app.calcEmployee(employeeOf(state, 'alexey'), '2026-08');
+check('За свой счёт: уменьшена фиксированная часть', c.fixedEarned, 45714.29);
+check('За свой счёт: уменьшен KPI', c.kpiEarned, 53333.33);
+check('За свой счёт: итог уменьшен пропорционально', c.accrued, 99047.62);
+
+/* Больничный остаётся отдельной существующей выплатой. */
+state.employees[0].absences = [
+  { id: 'sick', type: 'sick', start: '2026-08-03', end: '2026-08-07', overrides: {} },
+];
+c = app.calcEmployee(employeeOf(state, 'alexey'), '2026-08');
+check('Больничный: фиксированная часть не изменилась', c.fixedEarned, 60000);
+check('Больничный: отдельная выплата сохранена', c.sickPay, 10238.91);
+check('Больничный: прежняя формула итога сохранена', c.accrued, 123572.24);
 
 /* ---------- Руководитель ---------- */
 
@@ -150,7 +198,7 @@ state = load('2026-07');
 state.months['2026-07'].alexey.bonus = '';
 c = app.calcEmployee(employeeOf(state, 'alexey'), '2026-07');
 check('Пустое поле трактуется как ноль', c.bonus, 0);
-check('Пустое поле не ломает итог', c.accrued, 179804.13);
+check('Пустое поле не ломает итог', c.accrued, 169565.22);
 check('Ввод 123 в пустое поле даёт 123', app.num('123'), 123);
 check('Строка "0123" не появляется при вводе', app.num('0123'), 123);
 
@@ -228,7 +276,73 @@ check('Старая копия: отсутствия сохранены', migrat
 
 state = app.setTestState(oldBackup, '2026-08');
 c = app.calcEmployee(state.employees[0], '2026-08');
-check('Старая копия считается по новым формулам', c.accrued, 185096.70);
+check('Старая копия считается по новым формулам', c.accrued, 166666.67);
+
+/* ---------- Удаление и многократное редактирование отсутствий ---------- */
+
+const oldWithoutAbsenceIds = app.migrate({
+  version: 1,
+  employees: [{ id: 42, name: 'Старые данные', absences: [
+    { type: 'vacation', start: '2026-08-01', end: '2026-08-14' },
+  ] }],
+  months: {},
+});
+const legacyEmployee = oldWithoutAbsenceIds.employees[0];
+check('Числовой ID сотрудника нормализован', legacyEmployee.id, '42');
+checkTrue('Старому отсутствию назначен идентификатор', !!legacyEmployee.absences[0].id);
+const legacyAbsenceId = legacyEmployee.absences[0].id;
+check('Сохранённый отпуск удаляется', app.deleteAbsence(legacyEmployee, legacyAbsenceId), true);
+check('После удаления список отсутствий пуст', legacyEmployee.absences.length, 0);
+
+const editableEmployee = {
+  id: 'editable',
+  absences: [
+    { id: 'edit-me', type: 'vacation', start: '2026-08-01', end: '2026-08-14', overrides: { '2026-08': 9 } },
+  ],
+};
+let editResult = app.upsertAbsence(editableEmployee,
+  { type: 'vacation', start: '2026-08-02', end: '2026-08-15' }, 'edit-me');
+check('Первое повторное редактирование сохраняется', editResult.ok, true);
+editResult = app.upsertAbsence(editableEmployee,
+  { type: 'vacation', start: '2026-08-03', end: '2026-08-16' }, 'edit-me');
+check('Второе повторное редактирование сохраняется', editResult.ok, true);
+check('После повторного редактирования сохранено начало', editableEmployee.absences[0].start, '2026-08-03');
+check('После повторного редактирования сохранено окончание', editableEmployee.absences[0].end, '2026-08-16');
+check('Ручные рабочие дни не потеряны', editableEmployee.absences[0].overrides['2026-08'], 9);
+
+const beforeInvalidEdit = JSON.stringify(editableEmployee.absences);
+editResult = app.upsertAbsence(editableEmployee,
+  { type: 'vacation', start: '2026-08-20', end: '2026-08-10' }, 'edit-me');
+check('Окончание раньше начала отклоняется', editResult.ok, false);
+check('Ошибка валидации понятна', editResult.error, 'Дата окончания раньше даты начала.');
+check('При ошибке сохранённые даты не потеряны', JSON.stringify(editableEmployee.absences), beforeInvalidEdit);
+
+editableEmployee.absences.push(
+  { id: 'another', type: 'sick', start: '2026-08-20', end: '2026-08-22', overrides: {} },
+);
+const beforeOverlapEdit = JSON.stringify(editableEmployee.absences);
+editResult = app.upsertAbsence(editableEmployee,
+  { type: 'vacation', start: '2026-08-18', end: '2026-08-21' }, 'edit-me');
+check('Пересечение с другим отсутствием отклоняется', editResult.ok, false);
+check('При пересечении данные не изменяются', JSON.stringify(editableEmployee.absences), beforeOverlapEdit);
+
+editResult = app.upsertAbsence(editableEmployee,
+  { type: 'vacation', start: '2026-02-31', end: '2026-03-02' }, 'edit-me');
+check('Несуществующая календарная дата отклоняется', editResult.ok, false);
+check('Ошибка формата даты понятна', editResult.error, 'Укажите обе даты в формате ГГГГ-ММ-ДД.');
+
+/* ---------- Кроссбраузерная разметка ---------- */
+
+const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
+const css = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+checkTrue('Есть кнопка предыдущего месяца', html.includes('id="btnPrevMonth"'));
+checkTrue('Есть кнопка следующего месяца', html.includes('id="btnNextMonth"'));
+checkTrue('Есть отдельный выбор месяца', html.includes('id="monthSelect"'));
+checkTrue('Есть отдельный ввод года', html.includes('id="yearInput"'));
+checkTrue('Навигация не зависит от input type=month', !html.includes('type="month"'));
+checkTrue('На мобильной ширине включается карточный список',
+  css.includes('@media (max-width: 900px)') && css.includes('.mobile-list { display: block; }'));
+checkTrue('Выбор месяца занимает отдельную мобильную строку', css.includes('.month-picker { flex-basis: 100%; }'));
 
 /* ---------- Форматирование ---------- */
 
