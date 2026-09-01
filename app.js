@@ -90,8 +90,34 @@ function monthTitle(monthKey) {
 }
 
 function prevMonthKey(monthKey) {
-  const [y, m] = monthKey.split('-').map(Number);
-  return monthKeyOf(new Date(Date.UTC(y, m - 2, 1)));
+  return shiftMonthKey(monthKey, -1);
+}
+
+function shiftMonthKey(monthKey, delta) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(monthKey));
+  if (!match || !Number.isInteger(delta)) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  if (month < 1 || month > 12) return null;
+  const index = year * 12 + month - 1 + delta;
+  const nextYear = Math.floor(index / 12);
+  const nextMonth = ((index % 12) + 12) % 12 + 1;
+  if (nextYear < 1900 || nextYear > 9999) return null;
+  return `${String(nextYear).padStart(4, '0')}-${String(nextMonth).padStart(2, '0')}`;
+}
+
+function monthKeyFromParts(year, month) {
+  const y = Number(year);
+  const m = Number(month);
+  if (!Number.isInteger(y) || y < 1900 || y > 9999 || !Number.isInteger(m) || m < 1 || m > 12) {
+    return null;
+  }
+  return `${String(y).padStart(4, '0')}-${String(m).padStart(2, '0')}`;
+}
+
+function normalizeMonthKey(value, fallback = monthKeyOf(new Date())) {
+  const match = /^(\d{4})-(\d{2})$/.exec(String(value || ''));
+  return match ? (monthKeyFromParts(match[1], match[2]) || fallback) : fallback;
 }
 
 function daysBetweenInclusive(from, to) {
@@ -106,6 +132,12 @@ function formatDayMonth(iso) {
 
 function todayIso() {
   return new Date().toISOString().slice(0, 10);
+}
+
+function isValidIsoDate(value) {
+  const text = String(value || '');
+  const parsed = parseDate(text);
+  return /^\d{4}-\d{2}-\d{2}$/.test(text) && parsed !== null && toIso(parsed) === text;
 }
 
 /* ---------- Состояние ---------- */
@@ -123,15 +155,36 @@ let state = { version: 2, employees: [], months: {} };
 let currentMonth = monthKeyOf(new Date());
 const openRows = new Set();
 
+function normalizeAbsences(absences) {
+  const usedIds = new Set();
+  return (Array.isArray(absences) ? absences : []).map((absence) => {
+    let id = absence && absence.id !== undefined && absence.id !== null
+      ? String(absence.id)
+      : '';
+    if (!id || usedIds.has(id)) id = uid();
+    usedIds.add(id);
+    return {
+      ...(absence || {}),
+      id,
+      type: absence && ABSENCE_TYPES[absence.type] ? absence.type : 'vacation',
+      start: absence && absence.start ? String(absence.start) : '',
+      end: absence && absence.end ? String(absence.end) : '',
+      overrides: absence && absence.overrides && typeof absence.overrides === 'object'
+        ? { ...absence.overrides }
+        : {},
+    };
+  });
+}
+
 /** Приводит данные любой версии (в том числе резервные копии v1) к текущей схеме. */
 function migrate(raw) {
   const employees = (raw.employees || []).map((emp) => ({
-    id: emp.id || uid(),
+    id: String(emp.id || uid()),
     name: emp.name || '',
     position: emp.position || '',
     payType: PAY_TYPES[emp.payType] ? emp.payType : 'manager',
     hireDate: emp.hireDate || '',
-    absences: (emp.absences || []).map((a) => ({ ...a, overrides: a.overrides || {} })),
+    absences: normalizeAbsences(emp.absences),
   }));
   const months = {};
   for (const [monthKey, byEmployee] of Object.entries(raw.months || {})) {
@@ -160,7 +213,7 @@ function loadState() {
     const parsed = JSON.parse(raw);
     if (parsed && Array.isArray(parsed.employees) && parsed.months) {
       state = migrate(parsed);
-      if (parsed.currentMonth) currentMonth = parsed.currentMonth;
+      if (parsed.currentMonth) currentMonth = normalizeMonthKey(parsed.currentMonth, currentMonth);
     }
   } catch (err) {
     console.warn('Не удалось прочитать сохранённые данные', err);
@@ -193,7 +246,7 @@ function monthRecord(empId, monthKey = currentMonth) {
 }
 
 function findEmployee(empId) {
-  return state.employees.find((e) => e.id === empId);
+  return state.employees.find((e) => String(e.id) === String(empId));
 }
 
 /* ---------- Отсутствия ---------- */
@@ -233,6 +286,63 @@ function absencesOverlap(a, b) {
   const bEnd = parseDate(b.end);
   if (!aStart || !aEnd || !bStart || !bEnd) return false;
   return aStart <= bEnd && bStart <= aEnd;
+}
+
+function validateAbsenceDraft(employee, draft, editingId = null) {
+  const type = draft && draft.type;
+  const start = draft && String(draft.start || '');
+  const end = draft && String(draft.end || '');
+  if (!ABSENCE_TYPES[type]) return { ok: false, error: 'Выберите тип отсутствия.' };
+  if (!start || !end) return { ok: false, error: 'Укажите обе даты.' };
+  if (!isValidIsoDate(start) || !isValidIsoDate(end)) {
+    return { ok: false, error: 'Укажите обе даты в формате ГГГГ-ММ-ДД.' };
+  }
+  const s = parseDate(start);
+  const e = parseDate(end);
+  if (e < s) return { ok: false, error: 'Дата окончания раньше даты начала.' };
+
+  const editingKey = editingId === null || editingId === undefined ? null : String(editingId);
+  const candidate = { type, start, end };
+  const overlaps = (employee.absences || []).some((absence) =>
+    String(absence.id) !== editingKey && absencesOverlap(absence, candidate));
+  if (overlaps) {
+    return { ok: false, error: 'Период пересекается с другим отсутствием этого сотрудника.' };
+  }
+  return { ok: true, value: candidate };
+}
+
+function upsertAbsence(employee, draft, editingId = null) {
+  employee.absences = normalizeAbsences(employee.absences);
+  const editingKey = editingId === null || editingId === undefined ? null : String(editingId);
+  const index = editingKey === null
+    ? -1
+    : employee.absences.findIndex((absence) => absence.id === editingKey);
+  if (editingKey !== null && index < 0) {
+    return { ok: false, error: 'Сохранённое отсутствие не найдено. Закройте окно и повторите попытку.' };
+  }
+
+  const validation = validateAbsenceDraft(employee, draft, editingKey);
+  if (!validation.ok) return validation;
+  const existing = index >= 0 ? employee.absences[index] : null;
+  const absence = {
+    id: existing ? existing.id : uid(),
+    ...validation.value,
+    // Ручные рабочие дни могут относиться к нескольким месяцам и не должны
+    // пропадать при повторном редактировании дат.
+    overrides: existing ? { ...existing.overrides } : {},
+  };
+  if (index >= 0) employee.absences[index] = absence;
+  else employee.absences.push(absence);
+  employee.absences.sort((a, b) => a.start.localeCompare(b.start));
+  return { ok: true, absence };
+}
+
+function deleteAbsence(employee, absenceId) {
+  employee.absences = normalizeAbsences(employee.absences);
+  const id = String(absenceId);
+  const before = employee.absences.length;
+  employee.absences = employee.absences.filter((absence) => absence.id !== id);
+  return employee.absences.length < before;
 }
 
 /* ---------- Норма рабочих дней ---------- */
@@ -280,9 +390,17 @@ function calcEmployee(employee, monthKey = currentMonth) {
   const worked = Math.max(0, norm - missedWork);
   const kpiEarned = norm > 0 ? round2(fullKpi * worked / norm) : 0;
 
+  // Оплачиваемый отпуск и больничный не уменьшают фиксированную часть по
+  // существующим правилам. Дни за свой счёт уменьшают её пропорционально.
+  const fixedWorked = Math.max(0, norm - unpaidWork);
+  const fixedEarned = norm > 0 && unpaidWork > 0
+    ? round2(oklad * fixedWorked / norm)
+    : oklad;
+
   const vacationPay = isDirector
     ? (vacationCal > 0 ? DIRECTOR_VACATION_PAY : 0)
     : round2(oklad / AVG_MONTH_DAYS * vacationCal);
+  const vacationPayAdded = isDirector ? vacationPay : 0;
   const sickPay = round2(oklad / AVG_MONTH_DAYS * sickCal);
 
   const bonus = num(rec.bonus);
@@ -290,7 +408,7 @@ function calcEmployee(employee, monthKey = currentMonth) {
   const penalty = num(rec.penalty);
   const manual = num(rec.manual);
 
-  const accrued = round2(oklad + kpiEarned + vacationPay + sickPay
+  const accrued = round2(fixedEarned + kpiEarned + vacationPayAdded + sickPay
     + bonus + seniority - penalty + manual);
 
   const first = rec.payments.first;
@@ -305,9 +423,9 @@ function calcEmployee(employee, monthKey = currentMonth) {
 
   return {
     rec, employee, isDirector,
-    oklad, plan, fullKpi, norm, autoNorm: auto,
+    oklad, fixedEarned, plan, fullKpi, norm, autoNorm: auto,
     vacationCal, vacationWork, sickCal, sickWork, unpaidCal, unpaidWork,
-    missedWork, worked, kpiEarned, vacationPay, sickPay,
+    missedWork, worked, kpiEarned, vacationPay, vacationPayAdded, sickPay,
     bonus, seniority, penalty, manual, accrued,
     firstPlanned, secondPlanned, paidTotal, remaining,
     overpaid: remaining < 0 ? -remaining : 0,
@@ -359,6 +477,9 @@ function outputs(c) {
   const id = c.employee.id;
   return {
     oklad: formatMoney(c.oklad),
+    okladShort: formatMoneyShort(c.oklad),
+    fixedEarned: formatMoney(c.fixedEarned),
+    planShort: formatMoneyShort(c.plan),
     fullKpi: formatMoney(c.fullKpi),
     kpiEarned: formatMoney(c.kpiEarned),
     vacationPay: formatMoney(c.vacationPay),
@@ -447,7 +568,7 @@ function renderAbsenceList(employee) {
     const meta = ABSENCE_TYPES[a.type];
     const part = absenceInMonth(a, currentMonth);
     const inMonth = part
-      ? `В ${monthTitle(currentMonth)}: ${part.calendarDays} кал. дн.`
+      ? `В ${monthTitle(currentMonth)}: ${part.calendarDays} кал. дн. / ${part.workDays} раб. дн.`
       : 'В выбранном месяце нет';
     const overrideInput = part
       ? `<label class="field"><span>Пропущено раб. дней</span><input class="days" type="number" min="0" step="1"
@@ -536,10 +657,10 @@ function renderDetail(employee, c) {
 
     <div class="detail-columns">
       <div class="breakdown">
-        <div class="line"><span>Фиксированный оклад</span>${out(id, 'oklad', o.oklad)}</div>
+        <div class="line"><span>${c.unpaidWork > 0 ? 'Фиксированная часть после дней за свой счёт' : 'Фиксированный оклад'}</span>${out(id, 'fixedEarned', o.fixedEarned)}</div>
         <div class="line"><span>Полный KPI</span>${out(id, 'fullKpi', o.fullKpi)}</div>
         <div class="line"><span>KPI за отработанные дни</span>${out(id, 'kpiEarned', o.kpiEarned)}</div>
-        <div class="line"><span>Отпускные${c.isDirector ? ' (фиксированные)' : ''}</span>${out(id, 'vacationPay', o.vacationPay)}</div>
+        <div class="line"><span>Отпускные${c.isDirector ? ' (фиксированная выплата)' : ' (справочно, включены в оклад)'}</span>${out(id, 'vacationPay', o.vacationPay)}</div>
         <div class="line"><span>Больничные</span>${out(id, 'sickPay', o.sickPay)}</div>
         <div class="line"><span>Премия</span>${out(id, 'bonus', o.bonus)}</div>
         <div class="line"><span>Выслуга лет</span>${out(id, 'seniority', o.seniority)}</div>
@@ -573,8 +694,8 @@ function renderTable() {
       <td class="left"><span class="name-link" data-toggle="${emp.id}">${escapeHtml(emp.name || 'Без имени')}</span></td>
       <td class="left pos">${escapeHtml(emp.position || '–')}</td>
       <td class="left pos">${escapeHtml(PAY_TYPES[emp.payType])}</td>
-      <td>${escapeHtml(formatMoneyShort(c.oklad))}</td>
-      <td>${escapeHtml(formatMoneyShort(c.plan))}</td>
+      <td>${out(emp.id, 'okladShort', o.okladShort)}</td>
+      <td>${out(emp.id, 'planShort', o.planShort)}</td>
       <td>${out(emp.id, 'worked', o.worked)}</td>
       <td class="left">${absenceTags(emp)}</td>
       <td>${out(emp.id, 'vacationPay', o.vacationPay)}</td>
@@ -608,7 +729,7 @@ function renderMobile() {
       <div class="rows">
         <div class="line"><span>Отработано</span>${out(emp.id, 'worked', o.worked)}</div>
         <div class="line"><span>KPI за дни</span>${out(emp.id, 'kpiEarned', o.kpiEarned)}</div>
-        <div class="line"><span>Отпускные</span>${out(emp.id, 'vacationPay', o.vacationPay)}</div>
+        <div class="line"><span>Отпускные${c.isDirector ? '' : ' (в окладе)'}</span>${out(emp.id, 'vacationPay', o.vacationPay)}</div>
         <div class="line"><span>Выдано</span>${out(emp.id, 'paidTotal', o.paidTotal)}</div>
         <div class="line"><span>${out(emp.id, 'remainingLabel', o.remainingLabel)}</span>${out(emp.id, 'remaining', o.remaining)}</div>
       </div>
@@ -619,9 +740,27 @@ function renderMobile() {
   }).join('');
 }
 
+function syncMonthControls() {
+  if (!hasDom) return;
+  const [year, month] = currentMonth.split('-');
+  document.getElementById('monthSelect').value = String(Number(month));
+  document.getElementById('yearInput').value = year;
+  document.getElementById('currentMonthLabel').textContent = monthTitle(currentMonth);
+  document.getElementById('btnPrevMonth').disabled = shiftMonthKey(currentMonth, -1) === null;
+  document.getElementById('btnNextMonth').disabled = shiftMonthKey(currentMonth, 1) === null;
+}
+
+function changeMonthBy(delta) {
+  const next = shiftMonthKey(currentMonth, delta);
+  if (!next) return;
+  currentMonth = next;
+  saveState();
+  render();
+}
+
 function render() {
   if (!hasDom) return;
-  document.getElementById('monthInput').value = currentMonth;
+  syncMonthControls();
   renderSummary();
   renderErrors();
   renderTable();
@@ -802,24 +941,8 @@ function saveAbsence() {
   const start = document.getElementById('absStart').value;
   const end = document.getElementById('absEnd').value;
   const errorBox = document.getElementById('absError');
-  const s = parseDate(start);
-  const e = parseDate(end);
-
-  if (!s || !e) { errorBox.textContent = 'Укажите обе даты.'; return; }
-  if (e < s) { errorBox.textContent = 'Дата окончания раньше даты начала.'; return; }
-
-  const candidate = { id: modalContext.absenceId || uid(), type, start, end, overrides: {} };
-  const others = (emp.absences || []).filter((a) => a.id !== candidate.id);
-  if (others.some((a) => absencesOverlap(a, candidate))) {
-    errorBox.textContent = 'Период пересекается с другим отсутствием этого сотрудника.';
-    return;
-  }
-
-  emp.absences = emp.absences || [];
-  const index = emp.absences.findIndex((a) => a.id === candidate.id);
-  if (index >= 0) emp.absences[index] = candidate;
-  else emp.absences.push(candidate);
-  emp.absences.sort((a, b) => a.start.localeCompare(b.start));
+  const result = upsertAbsence(emp, { type, start, end }, modalContext.absenceId);
+  if (!result.ok) { errorBox.textContent = result.error; return; }
 
   saveState();
   closeModal();
@@ -876,10 +999,10 @@ function download(filename, content, mime) {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
-const CSV_HEADERS = ['Имя', 'Должность', 'Тип расчёта', 'Дата выхода', 'Оклад', 'Плановая ЗП с KPI',
+const CSV_HEADERS = ['Имя', 'Должность', 'Тип расчёта', 'Дата выхода', 'Базовый оклад', 'Фикс к начислению', 'Плановая ЗП с KPI',
   'Полный KPI', 'Норма дней', 'Отработано', 'Отпуск кал.', 'Отпуск раб.', 'Больничный кал.',
   'Больничный раб.', 'За свой счёт кал.', 'За свой счёт раб.', 'KPI за отработанные дни',
-  'Отпускные', 'Больничные', 'Премия', 'Выслуга лет', 'Штрафы', 'Ручная корректировка',
+  'Отпускные (справочно у менеджера)', 'Больничные', 'Премия', 'Выслуга лет', 'Штрафы', 'Ручная корректировка',
   'Начислено', 'Первая выплата', 'Дата первой выплаты', 'Вторая выплата', 'Дата второй выплаты',
   'Всего выдано', 'Остаток', 'Переплата', 'Оборот выход', 'Оборот вход', 'Прибыль', 'Комментарий'];
 
@@ -896,7 +1019,7 @@ function exportCsv() {
     const second = c.rec.payments.second;
     rows.push([
       emp.name, emp.position, PAY_TYPES[emp.payType], emp.hireDate,
-      c.oklad, c.plan, c.fullKpi, c.norm, c.worked,
+      c.oklad, c.fixedEarned, c.plan, c.fullKpi, c.norm, c.worked,
       c.vacationCal, c.vacationWork, c.sickCal, c.sickWork, c.unpaidCal, c.unpaidWork,
       c.kpiEarned, c.vacationPay, c.sickPay, c.bonus, c.seniority, c.penalty, c.manual,
       c.accrued, first.paidAmount || 0, first.paidDate, second.paidAmount || 0, second.paidDate,
@@ -922,7 +1045,7 @@ function importBackup(file) {
       }
       if (!confirm('Заменить текущие данные данными из файла?')) return;
       state = migrate(parsed);
-      if (parsed.currentMonth) currentMonth = parsed.currentMonth;
+      if (parsed.currentMonth) currentMonth = normalizeMonthKey(parsed.currentMonth, currentMonth);
       openRows.clear();
       saveState();
       render();
@@ -991,9 +1114,10 @@ function onClick(event) {
   } else if (data.absDel) {
     const emp = findEmployee(data.emp);
     if (emp && confirm('Удалить это отсутствие?')) {
-      emp.absences = emp.absences.filter((a) => a.id !== data.absDel);
-      saveState();
-      render();
+      if (deleteAbsence(emp, data.absDel)) {
+        saveState();
+        render();
+      }
     }
   } else if (data.empDel) {
     deleteEmployee(data.empDel);
@@ -1008,14 +1132,22 @@ function onClick(event) {
 
 function init() {
   loadState();
-  document.getElementById('monthInput').value = currentMonth;
+  syncMonthControls();
 
-  document.getElementById('monthInput').addEventListener('change', (e) => {
-    if (!e.target.value) return;
-    currentMonth = e.target.value;
+  const selectMonthFromControls = () => {
+    const next = monthKeyFromParts(
+      document.getElementById('yearInput').value,
+      document.getElementById('monthSelect').value,
+    );
+    if (!next) { syncMonthControls(); return; }
+    currentMonth = next;
     saveState();
     render();
-  });
+  };
+  document.getElementById('monthSelect').addEventListener('change', selectMonthFromControls);
+  document.getElementById('yearInput').addEventListener('change', selectMonthFromControls);
+  document.getElementById('btnPrevMonth').addEventListener('click', () => changeMonthBy(-1));
+  document.getElementById('btnNextMonth').addEventListener('click', () => changeMonthBy(1));
   document.getElementById('btnAdd').addEventListener('click', addEmployee);
   document.getElementById('btnCopy').addEventListener('click', copyPreviousMonth);
   document.getElementById('btnCalc').addEventListener('click', () => { saveState(); render(); });
@@ -1049,9 +1181,14 @@ if (typeof document !== 'undefined') {
 if (typeof module !== 'undefined' && module.exports) {
   module.exports = {
     round2, formatMoney, num, parseDate, autoNorm, calcEmployee, validate, migrate,
-    markPaid, monthRecord, copyPreviousMonth,
-    setTestState: (nextState, monthKey) => { state = migrate(nextState); currentMonth = monthKey; return state; },
+    markPaid, monthRecord, copyPreviousMonth, shiftMonthKey, monthKeyFromParts, normalizeMonthKey,
+    normalizeAbsences, validateAbsenceDraft, upsertAbsence, deleteAbsence,
+    setTestState: (nextState, monthKey) => {
+      state = migrate(nextState);
+      currentMonth = normalizeMonthKey(monthKey, currentMonth);
+      return state;
+    },
     getState: () => state,
-    setCurrentMonth: (monthKey) => { currentMonth = monthKey; },
+    setCurrentMonth: (monthKey) => { currentMonth = normalizeMonthKey(monthKey, currentMonth); },
   };
 }

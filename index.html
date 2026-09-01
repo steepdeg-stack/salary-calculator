@@ -10,10 +10,28 @@
 <header class="topbar">
   <h1 class="title">Зарплатный калькулятор</h1>
   <div class="toolbar">
-    <label class="month-picker">
-      <span class="ico">📅</span>
-      <input type="month" id="monthInput" aria-label="Месяц и год">
-    </label>
+    <div class="month-picker" role="group" aria-label="Выбор расчётного месяца">
+      <button type="button" class="month-nav" id="btnPrevMonth" aria-label="Предыдущий месяц" title="Предыдущий месяц">‹</button>
+      <label class="visually-hidden" for="monthSelect">Месяц</label>
+      <select id="monthSelect" aria-label="Месяц">
+        <option value="1">Январь</option>
+        <option value="2">Февраль</option>
+        <option value="3">Март</option>
+        <option value="4">Апрель</option>
+        <option value="5">Май</option>
+        <option value="6">Июнь</option>
+        <option value="7">Июль</option>
+        <option value="8">Август</option>
+        <option value="9">Сентябрь</option>
+        <option value="10">Октябрь</option>
+        <option value="11">Ноябрь</option>
+        <option value="12">Декабрь</option>
+      </select>
+      <label class="visually-hidden" for="yearInput">Год</label>
+      <input type="number" id="yearInput" min="1900" max="9999" step="1" inputmode="numeric" aria-label="Год">
+      <button type="button" class="month-nav" id="btnNextMonth" aria-label="Следующий месяц" title="Следующий месяц">›</button>
+      <output class="visually-hidden" id="currentMonthLabel" aria-live="polite"></output>
+    </div>
     <button class="btn btn-primary" id="btnAdd">＋ Добавить сотрудника</button>
     <button class="btn" id="btnCopy">⧉ Скопировать месяц</button>
     <button class="btn" id="btnCalc">Рассчитать</button>
@@ -39,7 +57,7 @@
           <th>ЗП с KPI</th>
           <th>Отработано</th>
           <th>Отсутствия</th>
-          <th>Отпускные</th>
+          <th title="Для менеджера показаны справочно и включены в фиксированный оклад">Отпускные*</th>
           <th>Прибыль</th>
           <th>Начислено</th>
           <th>Выдано</th>
