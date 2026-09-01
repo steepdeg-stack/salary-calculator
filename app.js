@@ -471,7 +471,8 @@ function renderPayment(c, key, title, plannedDay, amountValue, readonlyAmount) {
   const paid = payment.paidAmount !== null;
   const amountInput = readonlyAmount || paid
     ? `<input type="text" readonly value="${escapeHtml(formatMoney(paid ? payment.paidAmount : amountValue))}" data-pay-view="${id}:${key}">`
-    : `<input type="number" min="0" step="0.01" placeholder="0" data-pay-amount="${key}" data-emp="${id}" value="${escapeHtml(fieldValue(payment.amount))}">`;
+    : `<input type="number" min="0" step="0.01" placeholder="0" data-pay-amount="${key}" data-emp="${id}"
+         value="${escapeHtml(payment.amount !== '' ? fieldValue(payment.amount) : (amountValue > 0 ? String(amountValue) : ''))}">`;
   return `<div class="payment ${paid ? 'paid' : ''}">
     <div class="payment-head"><strong>${escapeHtml(title)}</strong>
       <span class="abs-sub">план: ${plannedDay}</span></div>
