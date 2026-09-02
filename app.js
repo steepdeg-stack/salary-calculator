@@ -914,7 +914,14 @@ function renderDetail(employee, calculation) {
   </div>`;
 }
 
+function tableColumnCount() {
+  if (!hasDom) return 13;
+  const headerRow = document.querySelector('#grid thead tr');
+  return headerRow && headerRow.cells.length ? headerRow.cells.length : 13;
+}
+
 function renderTable() {
+  const columnCount = tableColumnCount();
   document.getElementById('gridBody').innerHTML = state.employees.map((employee) => {
     const calculation = calcEmployee(employee);
     const values = outputs(calculation);
@@ -927,7 +934,7 @@ function renderTable() {
       <td>${calculation.profit ? `<span class="${calculation.profit > 0 ? 'money-pos' : 'money-neg'}">${out(employee.id, 'profitShort', values.profitShort)}</span>` : '<span class="dash">–</span>'}</td>
       <td><strong>${out(employee.id, 'accruedShort', values.accruedShort)}</strong></td><td>${out(employee.id, 'paidShort', values.paidShort)}</td>
       <td class="${calculation.remaining < 0 ? 'money-neg' : ''}">${out(employee.id, 'remainingShort', values.remainingShort)}</td></tr>`;
-    return main + (open ? `<tr class="detail-row"><td colspan="13">${renderDetail(employee, calculation)}</td></tr>` : '');
+    return main + (open ? `<tr class="detail-row"><td class="detail-cell" colspan="${columnCount}">${renderDetail(employee, calculation)}</td></tr>` : '');
   }).join('');
 }
 
@@ -1453,7 +1460,7 @@ if (typeof module !== 'undefined' && module.exports) {
     markPaid, undoPaid, monthRecord, monthSettings, setMonthRate, copyPreviousMonth,
     shiftMonthKey, monthKeyFromParts, normalizeMonthKey, normalizeAbsences,
     normalizePayments, validateAbsenceDraft, upsertAbsence, deleteAbsence,
-    parseBulkEmployees, addBulkEmployees, buildCsv, issuedRub,
+    parseBulkEmployees, addBulkEmployees, buildCsv, issuedRub, tableColumnCount,
     setTestState: (nextState, monthKey) => {
       state = migrate(nextState);
       currentMonth = normalizeMonthKey(monthKey, currentMonth);
