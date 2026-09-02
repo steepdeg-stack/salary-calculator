@@ -456,11 +456,21 @@ checkTrue('Есть кнопка массового добавления', html.
 checkTrue('Есть переключатель темы', html.includes('id="btnTheme"'));
 checkTrue('Есть верхняя кнопка удаления отсутствия', js.includes('data-abs-manage'));
 checkTrue('Строка сотрудника кликабельна целиком', js.includes('data-toggle-row'));
+check('Детальная строка охватывает все колонки таблицы', app.tableColumnCount(), 13);
+checkTrue('Число колонок detail-row берётся из актуального заголовка',
+  js.includes('class="detail-cell" colspan="${columnCount}"'));
 checkTrue('Есть кнопка добавления произвольной выплаты', js.includes('data-pay-add'));
 checkTrue('Тема хранится отдельно от зарплатных данных', js.includes("const THEME_KEY = 'salary-calculator-theme'"));
 checkTrue('На мобильной ширине включается карточный список',
   css.includes('@media (max-width: 900px)') && css.includes('.mobile-list { display: block; }'));
 checkTrue('Выбор месяца занимает отдельную мобильную строку', css.includes('.month-picker { flex-basis: 100%; }'));
+checkTrue('Заголовок таблицы не накладывается на строки при прокрутке',
+  css.includes('.grid th { position: static;'));
+checkTrue('Detail-row остаётся в нормальном потоке таблицы',
+  css.includes('.detail-row { display: table-row; height: auto; }') &&
+  css.includes('.detail-row > .detail-cell { display: table-cell; position: static; height: auto;'));
+checkTrue('Панель действий складывается в две колонки на узком экране',
+  css.includes('.detail-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));'));
 
 /* ---------- Форматирование ---------- */
 
