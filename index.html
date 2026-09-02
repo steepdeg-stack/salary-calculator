@@ -3,87 +3,82 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>Зарплатный калькулятор</title>
+<script>
+  (() => {
+    const saved = localStorage.getItem('salary-calculator-theme');
+    const theme = saved || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+    document.documentElement.dataset.theme = theme;
+  })();
+</script>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
 <header class="topbar">
-  <h1 class="title">Зарплатный калькулятор</h1>
+  <div class="brand-row">
+    <h1 class="title">Зарплатный калькулятор</h1>
+    <button class="btn theme-toggle" id="btnTheme" type="button" aria-label="Переключить тему" aria-pressed="false">◐ Тема</button>
+  </div>
   <div class="toolbar">
     <div class="month-picker" role="group" aria-label="Выбор расчётного месяца">
       <button type="button" class="month-nav" id="btnPrevMonth" aria-label="Предыдущий месяц" title="Предыдущий месяц">‹</button>
       <label class="visually-hidden" for="monthSelect">Месяц</label>
       <select id="monthSelect" aria-label="Месяц">
-        <option value="1">Январь</option>
-        <option value="2">Февраль</option>
-        <option value="3">Март</option>
-        <option value="4">Апрель</option>
-        <option value="5">Май</option>
-        <option value="6">Июнь</option>
-        <option value="7">Июль</option>
-        <option value="8">Август</option>
-        <option value="9">Сентябрь</option>
-        <option value="10">Октябрь</option>
-        <option value="11">Ноябрь</option>
-        <option value="12">Декабрь</option>
+        <option value="1">Январь</option><option value="2">Февраль</option><option value="3">Март</option>
+        <option value="4">Апрель</option><option value="5">Май</option><option value="6">Июнь</option>
+        <option value="7">Июль</option><option value="8">Август</option><option value="9">Сентябрь</option>
+        <option value="10">Октябрь</option><option value="11">Ноябрь</option><option value="12">Декабрь</option>
       </select>
       <label class="visually-hidden" for="yearInput">Год</label>
       <input type="number" id="yearInput" min="1900" max="9999" step="1" inputmode="numeric" aria-label="Год">
       <button type="button" class="month-nav" id="btnNextMonth" aria-label="Следующий месяц" title="Следующий месяц">›</button>
       <output class="visually-hidden" id="currentMonthLabel" aria-live="polite"></output>
     </div>
-    <button class="btn btn-primary" id="btnAdd">＋ Добавить сотрудника</button>
-    <button class="btn" id="btnCopy">⧉ Скопировать месяц</button>
-    <button class="btn" id="btnCalc">Рассчитать</button>
-    <button class="btn" id="btnCsv">⤓ Экспорт CSV</button>
-    <button class="btn" id="btnBackup">⤓ Резервная копия</button>
-    <button class="btn" id="btnRestore">⤒ Импорт копии</button>
+    <button class="btn btn-primary" id="btnAdd" type="button">＋ Добавить сотрудника</button>
+    <button class="btn" id="btnBulk" type="button">Массово добавить</button>
+    <button class="btn" id="btnCopy" type="button">⧉ Скопировать месяц</button>
+    <button class="btn" id="btnCalc" type="button">Рассчитать</button>
+    <button class="btn" id="btnCsv" type="button">⤓ Экспорт CSV</button>
+    <button class="btn" id="btnBackup" type="button">⤓ Резервная копия</button>
+    <button class="btn" id="btnRestore" type="button">⤒ Импорт копии</button>
     <span class="saved" id="savedBadge">Сохранено</span>
   </div>
 </header>
 
 <main class="wrap">
+  <section class="rates-panel" id="currencyRates" aria-label="Курсы валют"></section>
   <section class="cards" id="summary"></section>
   <div class="errors" id="errors" hidden></div>
   <section class="table-wrap">
     <table class="grid" id="grid">
       <thead>
         <tr>
-          <th class="col-toggle"></th>
-          <th>Сотрудник</th>
-          <th>Должность</th>
-          <th>Тип расчёта</th>
-          <th>Оклад</th>
-          <th>ЗП с KPI</th>
-          <th>Отработано</th>
-          <th>Отсутствия</th>
+          <th class="col-toggle"></th><th>Сотрудник</th><th>Должность</th><th>Тип расчёта</th>
+          <th>Оклад</th><th>ЗП с KPI</th><th>Отработано</th><th>Отсутствия</th>
           <th title="Для менеджера показаны справочно и включены в фиксированный оклад">Отпускные*</th>
-          <th>Прибыль</th>
-          <th>Начислено</th>
-          <th>Выдано</th>
-          <th>Остаток</th>
+          <th>Прибыль</th><th>Начислено</th><th>Выдано</th><th>Остаток</th>
         </tr>
       </thead>
       <tbody id="gridBody"></tbody>
     </table>
   </section>
   <section class="mobile-list" id="mobileList"></section>
-  <p class="empty" id="emptyHint" hidden>Пока нет сотрудников. Нажмите «Добавить сотрудника».</p>
+  <p class="empty" id="emptyHint" hidden>Пока нет сотрудников. Добавьте одного сотрудника или вставьте сразу несколько строк.</p>
 </main>
 
 <div class="modal" id="modal" hidden>
-  <div class="modal-box" role="dialog" aria-modal="true">
-    <h2 class="modal-title" id="modalTitle">Отсутствие</h2>
+  <div class="modal-box" role="dialog" aria-modal="true" aria-labelledby="modalTitle">
+    <h2 class="modal-title" id="modalTitle">Данные</h2>
     <div class="modal-body" id="modalBody"></div>
     <div class="modal-actions">
-      <button class="btn" id="modalCancel">Отмена</button>
-      <button class="btn btn-primary" id="modalSave">Сохранить</button>
+      <button class="btn" id="modalCancel" type="button">Отмена</button>
+      <button class="btn btn-primary" id="modalSave" type="button">Сохранить</button>
     </div>
   </div>
 </div>
 
 <input type="file" id="fileInput" accept="application/json" hidden>
-
 <script src="calendar.js"></script>
 <script src="app.js"></script>
 </body>
