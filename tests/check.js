@@ -1,4 +1,4 @@
-/* Проверка формул v2: node tests/check.js */
+/* Проверка формул и миграций v3: node tests/check.js */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
@@ -216,7 +216,7 @@ app.markPaid('alexey', 'first');
 c = app.calcEmployee(payEmp, '2026-08');
 check('Всего выдано после первой выплаты', c.paidTotal, 60000);
 check('Остаток к 15-му числу', c.remaining, 40000);
-checkTrue('Фактическая дата первой выплаты сохранена', !!c.rec.payments.first.paidDate);
+checkTrue('Фактическая дата первой выплаты сохранена', !!c.rec.payments[0].issuedDate);
 
 app.markPaid('alexey', 'second');
 c = app.calcEmployee(payEmp, '2026-08');
@@ -245,6 +245,60 @@ state = load('2026-08');
 c = app.calcEmployee(employeeOf(state, 'artem'), '2026-08');
 check('Первая выплата руководителя не подставляется', c.firstPlanned, 0);
 
+/* ---------- Гибридные выплаты и курсы ---------- */
+
+state = app.setTestState({
+  version: 3,
+  employees: [{ id: 'hybrid', name: 'Гибрид', position: 'Менеджер', payType: 'manager', hireDate: '', absences: [] }],
+  months: {
+    '2026-08': {
+      hybrid: {
+        oklad: 60000, plan: 130000, normManual: true, norm: 21,
+        payments: [
+          { id: 'rub', date: '2026-08-01', currency: 'RUB', amount: 60000, rate: 1 },
+          { id: 'usd', date: '2026-08-10', currency: 'USD', amount: 350, rate: 100 },
+          { id: 'byn', date: '2026-08-15', currency: 'BYN', amount: 1200, rate: 29.1666667 },
+        ],
+      },
+    },
+  },
+  monthSettings: {},
+}, '2026-08');
+const hybrid = employeeOf(state, 'hybrid');
+c = app.calcEmployee(hybrid, '2026-08');
+check('Валютная формула USD', c.paymentDetails[1].rubEquivalent, 35000);
+check('Валютная формула BYN округляется до копеек', c.paymentDetails[2].rubEquivalent, 35000);
+app.markPaid('hybrid', 'rub');
+app.markPaid('hybrid', 'usd');
+app.markPaid('hybrid', 'byn');
+c = app.calcEmployee(hybrid, '2026-08');
+check('Контрольный пример: начислено', c.accrued, 130000);
+check('Контрольный пример: выдано тремя выплатами', c.paidTotal, 130000);
+check('Контрольный пример: остаток', c.remaining, 0);
+
+const issuedUsd = c.rec.payments.find((payment) => payment.id === 'usd');
+check('При выдаче зафиксирована валюта', issuedUsd.issuedCurrency, 'USD');
+check('При выдаче зафиксирован курс', issuedUsd.issuedRate, 100);
+check('При выдаче зафиксирован RUB-эквивалент', issuedUsd.issuedRub, 35000);
+issuedUsd.rate = '125';
+app.setMonthRate('USD', '130', true, '2026-08');
+c = app.calcEmployee(hybrid, '2026-08');
+check('Выданная выплата не меняется после изменения курса', c.paidTotal, 130000);
+check('Зафиксированный эквивалент не меняется', issuedUsd.issuedRub, 35000);
+check('Месячный курс сохраняется', app.monthSettings('2026-08').rates.USD.value, '130');
+check('Фиксация месячного курса сохраняется', app.monthSettings('2026-08').rates.USD.locked, true);
+
+const reloadedHybrid = app.migrate(JSON.parse(JSON.stringify(app.getState())));
+check('Курс переживает JSON reload', reloadedHybrid.monthSettings['2026-08'].rates.USD.value, '130');
+check('Блокировка курса переживает JSON reload', reloadedHybrid.monthSettings['2026-08'].rates.USD.locked, true);
+check('Валютная выплата переживает JSON reload', reloadedHybrid.months['2026-08'].hybrid.payments[1].issuedCurrency, 'USD');
+check('Эквивалент переживает JSON reload', reloadedHybrid.months['2026-08'].hybrid.payments[1].issuedRub, 35000);
+
+const hybridCsv = app.buildCsv('2026-08');
+checkTrue('CSV содержит валютные колонки', hybridCsv.includes('Выплаты: валюта') && hybridCsv.includes('Выплаты: курс к RUB'));
+checkTrue('CSV содержит валюты всех выплат', hybridCsv.includes('RUB | USD | BYN'));
+checkTrue('CSV содержит состояние выдачи', hybridCsv.includes('Да | Да | Да'));
+
 /* ---------- Совместимость со старыми данными ---------- */
 
 const oldBackup = {
@@ -271,12 +325,68 @@ check('Старая копия: тип расчёта по умолчанию', 
 check('Старая копия: комментарий сохранён', migrated.months['2026-07'].alexey.comment, 'старый месяц');
 check('Старая копия: норма остаётся ручной', migrated.months['2026-08'].alexey.normManual, true);
 check('Старая копия: новые поля пустые', migrated.months['2026-08'].alexey.bonus, '');
-check('Старая копия: выплаты не выданы', migrated.months['2026-08'].alexey.payments.first.paidAmount, null);
+check('Старая копия: выплаты преобразованы в список', Array.isArray(migrated.months['2026-08'].alexey.payments), true);
+check('Старая копия: по умолчанию две выплаты', migrated.months['2026-08'].alexey.payments.length, 2);
+check('Старая копия: выплаты не выданы', migrated.months['2026-08'].alexey.payments[0].issued, false);
 check('Старая копия: отсутствия сохранены', migrated.employees[0].absences[0].start, '2026-07-27');
 
 state = app.setTestState(oldBackup, '2026-08');
 c = app.calcEmployee(state.employees[0], '2026-08');
 check('Старая копия считается по новым формулам', c.accrued, 166666.67);
+
+const oldPaymentsBackup = {
+  version: 2,
+  employees: [{ id: 77, name: 'Старые выплаты', payType: 'manager', absences: [] }],
+  months: {
+    '2026-08': {
+      77: {
+        oklad: 60000,
+        plan: 100000,
+        payments: {
+          first: { amount: 60000, paidAmount: 60000, paidDate: '2026-08-01' },
+          second: { amount: '', paidAmount: null, paidDate: '' },
+        },
+      },
+    },
+  },
+};
+const oldPaymentsMigrated = app.migrate(oldPaymentsBackup);
+const legacyPayments = oldPaymentsMigrated.months['2026-08']['77'].payments;
+check('Старые first/second стали массивом', legacyPayments.length, 2);
+check('Старая выплата мигрирована как RUB', legacyPayments[0].issuedCurrency, 'RUB');
+check('Старая выплата мигрирована с курсом 1', legacyPayments[0].issuedRate, 1);
+check('Старая отметка выдачи сохранена', legacyPayments[0].issued, true);
+check('Старая дата выдачи сохранена', legacyPayments[0].issuedDate, '2026-08-01');
+check('Старая сумма выдачи сохранена', legacyPayments[0].issuedRub, 60000);
+check('Старая вторая выплата остаётся невыданной', legacyPayments[1].issued, false);
+
+/* ---------- Массовый ввод ---------- */
+
+const bulkText = [
+  'Имя\tДолжность\tТип расчёта\tДата выхода\tОклад\tЗП с KPI',
+  'Анна П.\tМенеджер отдела\tМенеджер\t2026-08-03\t60000\t130000',
+  'Борис К.\tРуководитель\tРуководитель\t04.08.2026\t80000\t180000',
+].join('\n');
+const bulk = app.parseBulkEmployees(bulkText);
+check('Табличный ввод: ошибок нет', bulk.errors.length, 0);
+check('Табличный ввод: распознаны две строки', bulk.rows.length, 2);
+check('Табличный ввод: локальная дата нормализована', bulk.rows[1].hireDate, '2026-08-04');
+check('Табличный ввод: руководитель распознан', bulk.rows[1].payType, 'director');
+
+const csvBulk = app.parseBulkEmployees('Ирина,Аналитик,Менеджер,2026-08-05,70000,140000');
+check('CSV с запятой поддерживается', csvBulk.rows.length, 1);
+const semicolonBulk = app.parseBulkEmployees('Пётр;Продажи;Менеджер;2026-08-06;65000;150000');
+check('CSV с точкой с запятой поддерживается', semicolonBulk.rows.length, 1);
+const badBulk = app.parseBulkEmployees('Ошибка\tМенеджер\tКто-то\t31.02.2026\tмного\t100');
+check('Ошибочная строка не добавляется', badBulk.rows.length, 0);
+check('Ошибки привязаны к строке', badBulk.errors[0].line, 1);
+checkTrue('Ошибка массового ввода понятна', badBulk.errors[0].message.includes('тип') && badBulk.errors[0].message.includes('дата'));
+
+state = app.setTestState({ version: 3, employees: [], months: {}, monthSettings: {} }, '2026-08');
+const bulkAdded = app.addBulkEmployees(bulk.rows, '2026-08');
+check('Добавление всех создаёт двух сотрудников', bulkAdded.length, 2);
+check('Оклад массово добавленного сохранён', state.months['2026-08'][bulkAdded[0].id].oklad, '60000');
+check('План массово добавленного сохранён', state.months['2026-08'][bulkAdded[1].id].plan, '180000');
 
 /* ---------- Удаление и многократное редактирование отсутствий ---------- */
 
@@ -289,6 +399,7 @@ const oldWithoutAbsenceIds = app.migrate({
 });
 const legacyEmployee = oldWithoutAbsenceIds.employees[0];
 check('Числовой ID сотрудника нормализован', legacyEmployee.id, '42');
+check('Числовой ID 0 не теряется', app.migrate({ employees: [{ id: 0 }], months: {} }).employees[0].id, '0');
 checkTrue('Старому отсутствию назначен идентификатор', !!legacyEmployee.absences[0].id);
 const legacyAbsenceId = legacyEmployee.absences[0].id;
 check('Сохранённый отпуск удаляется', app.deleteAbsence(legacyEmployee, legacyAbsenceId), true);
@@ -335,11 +446,18 @@ check('Ошибка формата даты понятна', editResult.error, '
 
 const html = fs.readFileSync(path.join(__dirname, '..', 'index.html'), 'utf8');
 const css = fs.readFileSync(path.join(__dirname, '..', 'styles.css'), 'utf8');
+const js = fs.readFileSync(path.join(__dirname, '..', 'app.js'), 'utf8');
 checkTrue('Есть кнопка предыдущего месяца', html.includes('id="btnPrevMonth"'));
 checkTrue('Есть кнопка следующего месяца', html.includes('id="btnNextMonth"'));
 checkTrue('Есть отдельный выбор месяца', html.includes('id="monthSelect"'));
 checkTrue('Есть отдельный ввод года', html.includes('id="yearInput"'));
 checkTrue('Навигация не зависит от input type=month', !html.includes('type="month"'));
+checkTrue('Есть кнопка массового добавления', html.includes('id="btnBulk"'));
+checkTrue('Есть переключатель темы', html.includes('id="btnTheme"'));
+checkTrue('Есть верхняя кнопка удаления отсутствия', js.includes('data-abs-manage'));
+checkTrue('Строка сотрудника кликабельна целиком', js.includes('data-toggle-row'));
+checkTrue('Есть кнопка добавления произвольной выплаты', js.includes('data-pay-add'));
+checkTrue('Тема хранится отдельно от зарплатных данных', js.includes("const THEME_KEY = 'salary-calculator-theme'"));
 checkTrue('На мобильной ширине включается карточный список',
   css.includes('@media (max-width: 900px)') && css.includes('.mobile-list { display: block; }'));
 checkTrue('Выбор месяца занимает отдельную мобильную строку', css.includes('.month-picker { flex-basis: 100%; }'));
